@@ -1,27 +1,17 @@
-# US Data Crawler
+# us-data
 
-Go application that crawls minute OHLCV bars for US stocks from Polygon API. Supports full 2-year historical crawl and incremental daily updates.
+Go crawler that fetches minute OHLCV bars for financial instruments from the
+[Massive/Polygon API](https://massive.com/docs) and persists them locally as
+Parquet, CSV, or JSON.
 
-## Features
+Supports multi-asset classes (stocks, crypto, forex, indices), full 2-year
+historical backfill on first run, and incremental daily gap-fill thereafter.
 
-- **Polygon API** – minute aggregates, rate limit 5 req/min per key
-- **Chan model** – indiceChan + keyChan, workers = API keys, 12s cooldown per key
-- **Unified crawl** – no progress → full 2y; has progress → fill gap (lastdate+1 .. yesterday)
-- **Progress file** – `.lastday.json` per ticker (fan-in from workers)
-- **Output formats** – Parquet, CSV, JSON
-- **Graceful shutdown** – SIGINT/SIGTERM, finish current jobs then exit
-- **Fan-in patterns** – progress, log, error; heartbeat; summary (bars per ticker, per key)
-
-## Quick Start
+## Quick start
 
 ```bash
 cp .env.example .env
-# Edit .env: add POLYGON_API_KEYS (or POLYGON_API_KEY)
-
-# Fetch tickers (S&P 500 + NASDAQ 100)
-bash scripts/fetch_indices.sh
-
-# Run
+# Set POLYGON_API_KEYS in .env
 go run ./cmd/us-data/
 ```
 
@@ -29,65 +19,161 @@ go run ./cmd/us-data/
 
 ```bash
 cp .env.example .env
-# Edit .env: add POLYGON_API_KEYS (or POLYGON_API_KEY)
-
-bash scripts/fetch_indices.sh
-
+# Set POLYGON_API_KEYS in .env
 docker compose up --build -d
 docker compose logs -f crawler
 ```
 
-Data is stored in `./data` (or `DATA_DIR_HOST`). Progress persists across restarts.
+Data lands in `./data` (configurable via `DATA_DIR_HOST` in `.env`).
+Progress and reports persist across restarts via Docker volume.
 
 ## Configuration
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `POLYGON_API_KEY` | Single API key (alternative to `POLYGON_API_KEYS`) | - |
-| `POLYGON_API_KEYS` | One or more API keys (comma-separated); number of workers = number of keys | (required\*) |
-| `SAVE_FORMAT` | `parquet` \| `csv` \| `json` | `parquet` |
-| `DATA_DIR` | Data directory (local) | `data` |
-| `DATA_DIR_HOST` | Host path for Docker volume | `./data` |
-| `STOCK_SELECTION` | Currently only `file` is used; tickers are loaded from a file/indices list | `file` |
-| `TICKERS_FILE` | Path to ticker list (when `file`); falls back to `indices/combined.txt` when empty | `indices/combined.txt` |
-| `PHASE2_RUN_HOUR` | Next run hour (UTC 0-23) | `0` |
-| `PHASE2_RUN_MINUTE` | Next run minute (0-59) | `30` |
+All settings live in `config.yaml`. Secrets and overrides are supplied via
+environment variables — never put API keys in the config file.
 
-## Output
+| Env variable       | Description                                          |
+|--------------------|------------------------------------------------------|
+| `POLYGON_API_KEYS` | Comma-separated API keys. One worker per key.        |
+| `POLYGON_API_KEY`  | Alternative single-key form.                         |
+| `LOG_LEVEL`        | `debug` / `info` / `warn` / `error` (overrides YAML)|
+| `DATA_DIR`         | Root data directory (overrides YAML)                 |
+| `SAVE_FORMAT`      | `parquet` / `csv` / `json` (overrides YAML)          |
+| `DATA_DIR_HOST`    | Host path for Docker volume mount (default `./data`) |
+
+Key `config.yaml` sections:
+
+```yaml
+schedule:
+  runHour: 4       # UTC — 4:00 AM UTC = 11:00 AM Vietnam (UTC+7)
+  runMinute: 0     # 3h+ buffer after US extended session close (8 PM ET)
+
+log:
+  level: info      # debug | info | warn | error
+  format: text     # text (dev) | json (production / Docker log drivers)
+  file: ""         # optional path, e.g. logs/app.log
+                   # if set: logs go to both stderr AND the file
+
+assets:
+  - class: stocks
+    enabled: true
+    groups:
+      - sp500      # free: GitHub CSV
+      - nasdaq100  # free: Wikipedia
+    tickers: []    # additional explicit symbols
+    validate: false
+```
+
+## Asset groups
+
+| Group        | Source                  | Plan required |
+|--------------|-------------------------|---------------|
+| `sp500`      | GitHub CSV              | free          |
+| `nasdaq100`  | Wikipedia wikitext API  | free          |
+| `dji`        | Wikipedia wikitext API  | free          |
+| `russell2000`| Polygon ETF API         | Starter+      |
+| `all`        | Polygon reference API   | Starter+      |
+
+## Output layout
 
 ```
-data/Polygon/{Ticker}/{ticker}_{from}_to_{to}.{ext}
-data/Polygon/{Ticker}/{ticker}_{date}.{ext}   # per-day (gap fill)
-data/Polygon/.lastday.json                    # progress
+data/Polygon/
+├── stocks/
+│   └── AAPL/
+│       └── AAPL_2024-02-26_to_2026-02-25.parquet
+├── crypto/
+│   └── X:BTCUSD/
+│       └── X:BTCUSD_2024-02-26_to_2026-02-25.parquet
+├── .lastday.json          # progress: source:class:TICKER → last fetched date
+├── .lastrun.success.json  # tickers fetched successfully in last cycle
+└── .lastrun.failed.json   # tickers that failed with reason
 ```
 
-Example: `data/Polygon/AAPL/AAPL_2024-02-05_to_2026-02-05.parquet`
-
-## Project Structure (Option A)
+## Architecture
 
 ```
-├── cmd/us-data/      # Entry point
-├── internal/
-│   ├── app/          # config, phase, setup (bootstrap)
-│   ├── crawl/        # crawl, fanin, progress, report
-│   ├── provider/     # DataProvider + polygon (Crawler, transport, indices, types)
-│   └── saver/        # Packet savers (Parquet, CSV, JSON)
-├── indices/          # Ticker lists (combined.txt, sp500.txt)
-├── scripts/          # fetch_indices.sh
-└── docs/             # DEBUG.md, DIAGRAMS.md
+cmd/us-data/
+  main.go     entry point, defers: DP.Close(), log file flush
+  app.go      App struct, InitializeApp()
+
+internal/
+  app/
+    config.go     Config struct, LoadConfig (Viper), InitLogger, ApplyLogger
+    di.go         ProvideConfig, ProvidePacketSaver, ProvidePolygonProvider
+    bootstrap.go  ResolveTargets: ticker resolution per asset class
+    app.go        Run: scheduler loop + OS signal handling + graceful shutdown
+
+  crawl/
+    types.go      Job, JobResult, LogEntry, AssetClass, Done
+    interfaces.go BarFetcher interface (DIP boundary)
+    job.go        BuildTargets, resolveJobRange
+    progress.go   .lastday.json read/write, BootstrapProgress
+    producer.go   ProgressProducer: reads progress once, streams resolved Jobs
+    runner.go     Runner: worker pool, log channel, result channel, heartbeat
+    report.go     .lastrun.*.json
+
+  provider/
+    polygon_provider.go   PolygonProvider (implements BarFetcher)
+    polygon/
+      crawler.go          CrawlMinuteBarsWithKey, SaveBars
+      transport.go        HTTP client config
+      types.go            BarRaw, AggregatesResponse, FlexibleInt64
+      indices.go          ResolveAssetTickers, ETF API fallback
+      indices_free.go     GitHub CSV (S&P 500), Wikipedia (NASDAQ-100, DJI)
+
+  model/  bar.go   Bar struct (OHLCV + VWAP + Transactions)
+  saver/  *.go     PacketSaver: Parquet, CSV, JSON
 ```
+
+### Concurrency model
+
+```
+ProgressProducer goroutine
+  reads .lastday.json once → resolves from/to per target → chan<- Job
+
+Worker goroutines (one per API key)
+  receive Job → FetchBars (chunked, rate-limited) → SaveBars
+  chan<- JobResult      → result collector goroutine
+  chan<- LogEntry       → log writer goroutine → slog (sequential output)
+  chan<- ProgressUpdate → RunProgressWriter goroutine → .lastday.json
+
+Heartbeat goroutine
+  fires every 15 min; skips tick if done count unchanged
+```
+
+### Graceful shutdown
+
+```
+SIGINT / SIGTERM
+  │
+  ├─ during wait between cycles → exit immediately
+  │
+  └─ during active cycle
+       cancel(ctx)
+         workers stop accepting new jobs
+         in-flight FetchBars() completes naturally (not interrupted)
+       wg.Wait() → close(results/logs) → collectors drain → done <- Done{}
+       close(progressUpdates) → RunProgressWriter drains and exits
+       signal.Stop(signals)
+       defer a.Config.ApplyLogger()() → close log file
+       defer a.DP.Close()             → close HTTP connections
+```
+
+### DIP
+
+`crawl.Runner` depends only on `crawl.BarFetcher` — it imports no provider
+package. `PolygonProvider` lives in `internal/provider/` and satisfies the
+interface defined by the consumer (`internal/crawl/interfaces.go`).
 
 ## Debug
 
-See [docs/DEBUG.md](docs/DEBUG.md) for GODEBUG, GC trace, alloc trace, Docker commands.
-
 ```bash
-# GC trace
+go run -race ./cmd/us-data/          # race detector
+LOG_LEVEL=debug go run ./cmd/us-data/ # verbose logs
 GODEBUG=gctrace=1 go run ./cmd/us-data/
-
-# With Docker
-GODEBUG=gctrace=1 docker compose up
 ```
+
+See [docs/DEBUG.md](docs/DEBUG.md) for Docker debug commands and GODEBUG reference.
 
 ## License
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"us-data/internal/model"
@@ -17,21 +18,118 @@ import (
 )
 
 const (
-	// Max 50k results per request
-	maxLimit = 50000
+	polygonBaseURL = "https://api.polygon.io"
 
-	// Max days per 1-minute aggregates request (~50k bars / ~960 min/day ≈ 52 days; use 50 for safety)
-	maxDaysPerRequest = 50
+	// maxLimit is the Polygon hard cap on results per request.
+	maxLimit = 50000
 
 	// KeyCooldownSec: Polygon 5 req/min => 12s between requests per key
 	KeyCooldownSec = 12
-
-	// Minutes per trading day (max, extended hours)
-	minPerDay = 960
 )
 
-// estimatedBars returns pre-alloc capacity for [from, to]. days * 960 + 10% buffer. No grow.
-func estimatedBars(from, to time.Time) int {
+// barsPerDayBase is the maximum number of bars per calendar day for each
+// supported timespan at multiplier=1. Values are the worst-case upper bound
+// across all asset classes so chunk sizes never exceed maxLimit (50 000).
+//
+//   - minute: 1 440 = 24 × 60 — crypto/forex trade 24 h; stocks only use 960
+//     (extended hours), but we must size chunks for the densest asset class
+//     to avoid silent truncation on Polygon responses.
+//   - hour/day/week/month: straightforward calendar units.
+//
+// For multiplier N, the effective bars/day = barsPerDayBase[ts] / N.
+var barsPerDayBase = map[string]int{
+	"minute": 1440, // 24 × 60 — upper bound for crypto/forex
+	"hour":   24,
+	"day":    1,
+	"week":   1,
+	"month":  1,
+}
+
+// timespanSuffix maps each supported timespan to its file-name suffix.
+// The numeric multiplier is prepended at runtime: "5" + "min" → "5min".
+var timespanSuffix = map[string]string{
+	"minute": "min",
+	"hour":   "h",
+	"day":    "d",
+	"week":   "wk",
+	"month":  "mo",
+}
+
+// Crawler is responsible for fetching bar aggregates from the Polygon API
+// and optionally persisting raw packets to disk.
+type Crawler struct {
+	client        *http.Client
+	SavePacketDir string
+	PacketSaver   saver.PacketSaver // When non-nil, used to persist raw packets.
+	SavePerDay    bool              // When true, saves one file per day; otherwise a single range file.
+	Timespan      string            // minute | hour | day | week | month (default: minute)
+	Multiplier    int               // timeframe multiplier, e.g. 1, 5, 15 (default: 1)
+}
+
+func (c *Crawler) timespan() string {
+	if ts := strings.ToLower(strings.TrimSpace(c.Timespan)); ts != "" {
+		return ts
+	}
+	return "minute"
+}
+
+func (c *Crawler) multiplier() int {
+	if c.Multiplier > 0 {
+		return c.Multiplier
+	}
+	return 1
+}
+
+// timespanLabel returns a compact label for use in file names.
+//
+//	minute/1  → "1min"   minute/5  → "5min"
+//	hour/1    → "1h"     day/1     → "1d"
+//	week/1    → "1wk"    month/1   → "1mo"
+func (c *Crawler) timespanLabel() string {
+	suffix, ok := timespanSuffix[c.timespan()]
+	if !ok {
+		suffix = c.timespan()
+	}
+	return fmt.Sprintf("%d%s", c.multiplier(), suffix)
+}
+
+// maxChunkDays is the upper bound for a single API request window.
+// 730 = 2 years, matching the default backfillYears. Any chunk larger than
+// the job range is harmless (Polygon trims the response), but there is no
+// reason to request more than the longest possible job window.
+const maxChunkDays = 730
+
+// maxDaysPerChunk returns the maximum calendar days per API request so that
+// the bar count stays under maxLimit.
+//
+//	days = floor(maxLimit × multiplier / barsPerDayBase[timespan])
+//
+// The result is capped at maxChunkDays (730) so chunks never exceed the
+// default 2-year backfill window.
+func (c *Crawler) maxDaysPerChunk() int {
+	base, ok := barsPerDayBase[c.timespan()]
+	if !ok || base <= 0 {
+		return maxChunkDays
+	}
+	d := maxLimit * c.multiplier() / base
+	if d < 1 {
+		d = 1
+	}
+	if d > maxChunkDays {
+		d = maxChunkDays
+	}
+	return d
+}
+
+// estimatedBars returns a pre-allocation capacity for [from, to] to avoid slice growth.
+//
+// barsPerDayBase already uses worst-case density (1440 for minute = crypto/forex),
+// so stocks (~960 bars/day) naturally get ~50% headroom before the +20% buffer.
+// This intentional generosity avoids reallocs without a separate cap formula.
+//
+//	1-min  →  ~1.25 M    5-min  → ~250 k
+//	1-hour →   ~21 k     1-day  →    ~880
+func (c *Crawler) estimatedBars(from, to time.Time) int {
 	if !from.Before(to) && !from.Equal(to) {
 		return 0
 	}
@@ -39,35 +137,15 @@ func estimatedBars(from, to time.Time) int {
 	if days < 1 {
 		days = 1
 	}
-	n := days * minPerDay
-	// +10% buffer so we never realloc
-	n = n + n/10
-	if n > 500000 {
-		n = 500000 // 504 days * 960 min/day
+	base, ok := barsPerDayBase[c.timespan()]
+	if !ok || base <= 0 {
+		base = 1
 	}
-	return n
-}
-
-// LogFunc emits a log line. When set, used instead of log.Printf (fan-in logger).
-type LogFunc func(msg string)
-
-// Crawler is responsible for fetching minute-bar aggregates from the Polygon API
-// and optionally persisting raw packets to disk.
-type Crawler struct {
-	client        *http.Client
-	SavePacketDir string
-	PacketSaver   saver.PacketSaver // When non-nil, used to persist raw packets.
-	SavePerDay    bool              // When true, saves one file per day {ticker}_{date}.ext; otherwise a single range file.
-	LogFunc       LogFunc           // Optional fan-in logger for crawl progress and diagnostics.
-}
-
-func (c *Crawler) logf(format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	if c.LogFunc != nil {
-		c.LogFunc(msg)
-	} else {
-		slog.Info(msg)
+	barsPerDay := base / c.multiplier()
+	if barsPerDay < 1 {
+		barsPerDay = 1
 	}
+	return days*barsPerDay + days*barsPerDay/5 // +20% buffer
 }
 
 // Close closes connections
@@ -75,28 +153,34 @@ func (c *Crawler) Close() error {
 	return nil
 }
 
-// saveBarsPacket writes bars to SavePacketDir using PacketSaver if configured.
-func (c *Crawler) saveBarsPacket(ticker string, from, to time.Time, bars []model.Bar) {
-	if c.SavePacketDir == "" || c.PacketSaver == nil || len(bars) == 0 {
+// SaveBars persists bars into dir/ticker/ using the configured PacketSaver.
+// dir is the asset-class-specific directory (e.g. data/Polygon/stocks).
+// If dir is empty or PacketSaver is nil, the call is a no-op.
+//
+// File name format: {ticker}_{timespan}_{from}.{ext}  (per-day)
+//                   {ticker}_{timespan}_{from}_to_{to}.{ext}  (range)
+func (c *Crawler) SaveBars(dir, ticker string, from, to time.Time, bars []model.Bar) {
+	if dir == "" || c.PacketSaver == nil || len(bars) == 0 {
 		return
 	}
-	tickerDir := filepath.Join(c.SavePacketDir, ticker)
+	tickerDir := filepath.Join(dir, ticker)
 	if err := os.MkdirAll(tickerDir, 0755); err != nil {
-		c.logf("[%s] Save: cannot create folder %s: %v", ticker, tickerDir, err)
+		slog.Error("save: mkdir failed", "ticker", ticker, "dir", tickerDir, "err", err)
 		return
 	}
 	ext := c.PacketSaver.Extension()
-	var packetName string
+	ts := c.timespanLabel()
+	var name string
 	if c.SavePerDay {
-		packetName = fmt.Sprintf("%s_%s.%s", ticker, from.Format("2006-01-02"), ext)
+		name = fmt.Sprintf("%s_%s_%s.%s", ticker, ts, from.Format("2006-01-02"), ext)
 	} else {
-		packetName = fmt.Sprintf("%s_%s_to_%s.%s", ticker, from.Format("2006-01-02"), to.Format("2006-01-02"), ext)
+		name = fmt.Sprintf("%s_%s_%s_to_%s.%s", ticker, ts, from.Format("2006-01-02"), to.Format("2006-01-02"), ext)
 	}
-	packetPath := filepath.Join(tickerDir, packetName)
+	packetPath := filepath.Join(tickerDir, name)
 	if err := c.PacketSaver.Save(bars, packetPath); err != nil {
-		c.logf("[%s] Save: failed to write %s: %v", ticker, packetPath, err)
+		slog.Error("save: write failed", "ticker", ticker, "path", packetPath, "err", err)
 	} else {
-		c.logf("[%s] Saved 1 file (%s): %s (%d bars)", ticker, ext, packetPath, len(bars))
+		slog.Info("save ok", "ticker", ticker, "format", ext, "path", packetPath, "bars", len(bars))
 	}
 }
 
@@ -145,9 +229,11 @@ func adjustLastChunkToAvoidDelayed(chunkTo time.Time, isLastChunk bool) time.Tim
 const maxRetries = 3
 const retryDelay = 15 * time.Second
 
-// buildMinuteAggregatesRequest builds GET request for 1-minute aggregates (adjusted, limit, sort, apiKey).
-func (c *Crawler) buildMinuteAggregatesRequest(ticker string, fromMillis, toMillis int64, apiKey string) (*http.Request, error) {
-	rawURL := fmt.Sprintf("%s/v2/aggs/ticker/%s/range/1/minute/%d/%d", polygonBaseURL, ticker, fromMillis, toMillis)
+// buildAggregatesRequest builds a GET request for bar aggregates using the
+// configured Timespan and Multiplier (e.g. range/1/minute, range/5/minute, range/1/day).
+func (c *Crawler) buildAggregatesRequest(ticker string, fromMillis, toMillis int64, apiKey string) (*http.Request, error) {
+	rawURL := fmt.Sprintf("%s/v2/aggs/ticker/%s/range/%d/%s/%d/%d",
+		polygonBaseURL, ticker, c.multiplier(), c.timespan(), fromMillis, toMillis)
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse URL: %w", err)
@@ -217,45 +303,42 @@ func (c *Crawler) doAggregatesRequest(client *http.Client, req *http.Request, on
 	return nil, fmt.Errorf("no response")
 }
 
-// CrawlMinuteBarsWithKey fetches minute-bar aggregates for the given ticker and time range
-// using the provided API key. Callers are responsible for API-key rotation and rate limiting.
-func (c *Crawler) CrawlMinuteBarsWithKey(ticker, apiKey string, from, to time.Time) ([]model.Bar, error) {
+// CrawlBarsWithKey fetches bar aggregates for the given ticker and time range using
+// the provided API key. The timeframe is determined by Crawler.Timespan and Crawler.Multiplier.
+// Callers are responsible for API-key rotation and rate limiting.
+func (c *Crawler) CrawlBarsWithKey(ticker, apiKey string, from, to time.Time) ([]model.Bar, error) {
 	client := c.client
 	if client == nil {
 		client = http.DefaultClient
 	}
 
-	allBars := make([]model.Bar, 0, estimatedBars(from, to))
-	chunks := splitDateRangeIntoChunks(from, to, maxDaysPerRequest)
+	allBars := make([]model.Bar, 0, c.estimatedBars(from, to))
+	chunks := splitDateRangeIntoChunks(from, to, c.maxDaysPerChunk())
 	if len(chunks) == 0 {
-		c.logf("[%s] No chunks in date range %s to %s", ticker, from, to)
+		slog.Debug("no chunks in date range",
+			"ticker", ticker, "from", from.Format("2006-01-02"), "to", to.Format("2006-01-02"))
 		return allBars, nil
 	}
 
-	keyPrefix := apiKey
+	keyPfx := apiKey
 	if len(apiKey) > 8 {
-		keyPrefix = apiKey[:8]
+		keyPfx = apiKey[:8] + "…"
 	}
-	c.logf("[%s] Split into %d chunks (key=%s...)", ticker, len(chunks), keyPrefix)
+	slog.Debug("fetch split",
+		"ticker", ticker, "chunks", len(chunks), "timespan", c.timespanLabel(), "key", keyPfx)
 
 	for chunkIndex, ch := range chunks {
-		// Rate limit: wait 12s before each request (except first chunk) for 5 req/min/key
 		if chunkIndex > 0 {
-			cooldown := KeyCooldownSec * time.Second
-			c.logf("[RATE] [%s] chunk %d/%d: cooldown %ds (key=%s...) start", ticker, chunkIndex+1, len(chunks), KeyCooldownSec, keyPrefix)
-			start := time.Now()
-			time.Sleep(cooldown)
-			elapsed := time.Since(start)
-			c.logf("[RATE] [%s] chunk %d/%d: cooldown done (waited %.2fs, key ready)", ticker, chunkIndex+1, len(chunks), elapsed.Seconds())
+			slog.Debug("rate cooldown",
+				"ticker", ticker, "chunk", chunkIndex+1, "of", len(chunks),
+				"wait_s", KeyCooldownSec, "key", keyPfx)
+			time.Sleep(KeyCooldownSec * time.Second)
 		}
 
 		chunkFrom := ch[0]
 		chunkTo := adjustLastChunkToAvoidDelayed(ch[1], chunkIndex == len(chunks)-1)
 
-		fromMillis := chunkFrom.UnixMilli()
-		toMillis := chunkTo.UnixMilli()
-
-		req, err := c.buildMinuteAggregatesRequest(ticker, fromMillis, toMillis, apiKey)
+		req, err := c.buildAggregatesRequest(ticker, chunkFrom.UnixMilli(), chunkTo.UnixMilli(), apiKey)
 		if err != nil {
 			return nil, err
 		}
@@ -271,17 +354,12 @@ func (c *Crawler) CrawlMinuteBarsWithKey(ticker, apiKey string, from, to time.Ti
 			allBars = append(allBars, barRaw.ToBar())
 		}
 
-		// Cooldown after last chunk before returning key to chan (key ready for next request)
-		if chunkIndex < len(chunks)-1 {
-			// Not last chunk: no sleep
-		} else {
-			cooldown := KeyCooldownSec * time.Second
-			c.logf("[RATE] [%s] last chunk done: cooldown %ds (key=%s...) before returning key", ticker, KeyCooldownSec, keyPrefix)
-			start := time.Now()
-			time.Sleep(cooldown)
-			c.logf("[RATE] [%s] cooldown done (waited %.2fs), return key", ticker, time.Since(start).Seconds())
+		// Post-last-chunk cooldown: key must be rested before the caller returns it to the pool.
+		if chunkIndex == len(chunks)-1 {
+			slog.Debug("rate cooldown (post-fetch)",
+				"ticker", ticker, "wait_s", KeyCooldownSec, "key", keyPfx)
+			time.Sleep(KeyCooldownSec * time.Second)
 		}
 	}
-	c.saveBarsPacket(ticker, from, to, allBars)
 	return allBars, nil
 }

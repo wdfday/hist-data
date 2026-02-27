@@ -1,0 +1,74 @@
+provider: massive        # massive | polygon (both point to the same API; "massive" is the new brand)
+
+api:
+  # API keys for Massive/Polygon. One worker goroutine per key.
+  # Prefer setting via env: POLYGON_API_KEYS=key1,key2  (overrides this list)
+  keys: []
+
+data:
+  dir: data              # root data directory; files land in {dir}/Polygon/{class}/{ticker}/...
+  format: parquet        # parquet | csv | json
+
+  # Bar timeframe — controls the Polygon aggregates endpoint:
+  #   /v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from}/{to}
+  timespan: minute       # minute | hour | day | week | month
+  multiplier: 5          # timeframe multiplier  (5 → 5-minute bars, 1 → 1-minute)
+
+  # How many years of history to fetch when a ticker has no progress entry.
+  # Larger values = more data on first run, but significantly longer backfill time.
+  #   minute bars: 2 years   ≈ 500 API calls per ticker
+  backfillYears: 2
+
+schedule:
+  runHour: 4             # UTC hour  — 4:00 AM UTC = 11:00 AM Vietnam (UTC+7)
+  runMinute: 0           # 3h+ buffer after US extended session close (8 PM ET)
+
+log:
+  level: info            # debug | info | warn | error
+  format: json           # text (dev) | json (production / Docker log drivers)
+  file: "data/app.log"   # optional log file path; written alongside market data
+                         # if set, logs are written to both stderr and the file
+
+# ---------------------------------------------------------------------------
+# Asset classes to crawl.
+# Each entry can define:
+#   groups   - named index constituents:
+#                sp500, nasdaq100, dji  → free (GitHub CSV / Wikipedia)
+#                russell2000, all       → ⚠ Starter+ plan required (massive.com/pricing)
+#   tickers  - explicit individual symbols; combined with groups, deduped
+#   validate - if true, each symbol is verified against the reference API
+# ---------------------------------------------------------------------------
+assets:
+  - class: stocks
+    enabled: true
+    groups:
+      - sp500            # free: loaded from GitHub CSV
+      - nasdaq100        # free: loaded from Wikipedia
+      # - dji            # free: loaded from Wikipedia
+      # - russell2000    # paid Starter+ plan required
+    tickers: []          # additional explicit symbols
+    validate: false
+
+  - class: crypto
+    enabled: false
+    groups: []           # no named groups yet; use tickers
+    tickers:
+      - X:BTCUSD
+      - X:ETHUSD
+    validate: true
+
+  - class: forex
+    enabled: false
+    groups: []
+    tickers:
+      - C:EURUSD
+      - C:USDJPY
+    validate: true
+
+  - class: indices
+    enabled: false
+    groups: []
+    tickers:
+      - I:SPX
+      - I:NDX
+    validate: false      # indices symbols are stable; skip validation

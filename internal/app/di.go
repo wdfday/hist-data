@@ -4,42 +4,27 @@ import (
 	"fmt"
 
 	"us-data/internal/provider"
-	"us-data/internal/provider/polygon"
 	"us-data/internal/saver"
 )
 
-// ProvideConfig loads config from environment (for Wire).
-func ProvideConfig() *Config {
+// ProvideConfig loads application config. Used by Wire.
+func ProvideConfig() (*Config, error) {
 	return LoadConfig()
 }
 
-// ProvidePacketSaver creates PacketSaver from config (for Wire).
-// Returns error if SaveFormat is not supported.
+// ProvidePacketSaver constructs the bar persistence backend from config. Used by Wire.
 func ProvidePacketSaver(cfg *Config) (saver.PacketSaver, error) {
-	ps := saver.NewPacketSaver(cfg.SaveFormat)
+	ps := saver.NewPacketSaver(cfg.Data.Format)
 	if ps == nil {
-		return nil, fmt.Errorf("unsupported SAVE_FORMAT %q (use: csv, parquet, json)", cfg.SaveFormat)
+		return nil, fmt.Errorf("unsupported data.format %q (allowed: csv, parquet, json)", cfg.Data.Format)
 	}
 	return ps, nil
 }
 
-// ProvidePolygonProvider creates and wires PolygonProvider with config and PacketSaver (for Wire).
-// Caller must call dp.Close() when shutting down.
+// ProvidePolygonProvider constructs a fully configured PolygonProvider. Used by Wire.
 func ProvidePolygonProvider(cfg *Config, ps saver.PacketSaver) (*provider.PolygonProvider, error) {
-	p, err := createPolygonProvider(cfg)
-	if err != nil {
-		return nil, err
+	if len(cfg.API.Keys) == 0 {
+		return nil, fmt.Errorf("no API keys configured")
 	}
-	pp, ok := p.(*provider.PolygonProvider)
-	if !ok {
-		return nil, fmt.Errorf("expected *provider.PolygonProvider, got %T", p)
-	}
-	pp.SetSavePacketDir(cfg.SaveBaseDir())
-	pp.SetPacketSaver(ps)
-	return pp, nil
-}
-
-// ProvidePolygonCrawler creates polygon.Crawler for ticker loading (for Wire / optional use).
-func ProvidePolygonCrawler(cfg *Config) (*polygon.Crawler, error) {
-	return CreatePolygonCrawler(cfg)
+	return provider.NewPolygonProvider(cfg.SaveBaseDir(), ps, cfg.Data.Timespan, cfg.Data.Multiplier)
 }

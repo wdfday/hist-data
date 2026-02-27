@@ -31,12 +31,8 @@ func writeRunReport(saveBaseDir string, successList []string, failedList []faile
 		slog.Info("report wrote success", "path", p, "tickers", len(successList))
 	}
 	if len(failedList) > 0 {
-		entries := make([]failedEntry, len(failedList))
-		for i, f := range failedList {
-			entries[i] = failedEntry{Ticker: f.Ticker, DateRange: f.DateRange, Reason: f.Reason}
-		}
 		p := filepath.Join(saveBaseDir, ".lastrun.failed.json")
-		data, err := json.MarshalIndent(entries, "", "  ")
+		data, err := json.MarshalIndent(failedList, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -46,15 +42,6 @@ func writeRunReport(saveBaseDir string, successList []string, failedList []faile
 		slog.Info("report wrote failed", "path", p, "count", len(failedList))
 	}
 	return nil
-}
-
-func appendSuccess(list []string, ticker string) []string {
-	for _, t := range list {
-		if t == ticker {
-			return list
-		}
-	}
-	return append(list, ticker)
 }
 
 func joinFailedReasons(failedList []failedEntry) string {

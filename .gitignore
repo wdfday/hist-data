@@ -25,14 +25,6 @@ tickers.json
 *.swo
 *~
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/
-*.egg-info/
-.eggs/
 
 # OS
 .DS_Store

@@ -1,7 +1,7 @@
 package model
 
 // Bar represents one OHLCV bar (minute/daily etc.).
-// Dùng chung cho provider, saver và serialization (json, parquet).
+// Shared across provider, saver, and serialization layers (json, parquet).
 type Bar struct {
 	Timestamp    int64   `json:"t" parquet:"t"` // Unix timestamp in milliseconds
 	Open         float64 `json:"o" parquet:"o"`

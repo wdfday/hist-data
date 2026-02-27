@@ -1,73 +1,148 @@
 package app
 
 import (
+	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
+
+	"github.com/spf13/viper"
 )
 
-// Config holds application configuration from env
+// logLevel is a package-level LevelVar so the log level can be changed at
+// runtime (after config is loaded) without recreating the handler.
+var logLevel = new(slog.LevelVar) // defaults to Info
+
+// AssetConfig describes one asset class to crawl.
+type AssetConfig struct {
+	Class    string   `mapstructure:"class"`
+	Enabled  bool     `mapstructure:"enabled"`
+	Groups   []string `mapstructure:"groups"`  // sp500 | nasdaq100 | dji | all
+	Tickers  []string `mapstructure:"tickers"` // explicit individual symbols
+	Validate bool     `mapstructure:"validate"`
+}
+
+// Config is the application configuration loaded from config.yaml with env overrides.
 type Config struct {
-	DataProvider    string
-	StockSelection  string
-	TickersFile     string
-	DataDir         string
-	SaveFormat      string
-	LogLevel        string // debug | info | warn | error
-	PolygonAPIKeys  []string
-	Phase2RunHour   int
-	Phase2RunMinute int
+	Provider string `mapstructure:"provider"`
+
+	API struct {
+		Keys []string `mapstructure:"keys"`
+	} `mapstructure:"api"`
+
+	Data struct {
+		Dir           string `mapstructure:"dir"`
+		Format        string `mapstructure:"format"`
+		Timespan      string `mapstructure:"timespan"`      // minute | hour | day | week | month
+		Multiplier    int    `mapstructure:"multiplier"`    // e.g. 1, 5, 15
+		BackfillYears int    `mapstructure:"backfillYears"` // years of history on first run
+	} `mapstructure:"data"`
+
+	Schedule struct {
+		RunHour   int `mapstructure:"runHour"`
+		RunMinute int `mapstructure:"runMinute"`
+	} `mapstructure:"schedule"`
+
+	Log struct {
+		Level  string `mapstructure:"level"`
+		Format string `mapstructure:"format"` // text | json  (default: text)
+		File   string `mapstructure:"file"`   // optional path; empty = stderr only
+	} `mapstructure:"log"`
+
+	Assets []AssetConfig `mapstructure:"assets"`
 }
 
-// Load reads config from environment
-func LoadConfig() *Config {
-	cfg := &Config{
-		DataProvider:    getEnv("DATA_PROVIDER", "polygon"),
-		StockSelection:  getEnv("STOCK_SELECTION", "file"),
-		TickersFile:     os.Getenv("TICKERS_FILE"),
-		DataDir:         getEnv("DATA_DIR", "data"),
-		LogLevel:        getEnv("LOG_LEVEL", "info"),
-		Phase2RunHour:   0,
-		Phase2RunMinute: 30,
-	}
-	cfg.SaveFormat = getSaveFormat()
-	cfg.PolygonAPIKeys = parsePolygonAPIKeys()
-	if h := os.Getenv("PHASE2_RUN_HOUR"); h != "" {
-		if v, err := strconv.Atoi(h); err == nil && v >= 0 && v <= 23 {
-			cfg.Phase2RunHour = v
-		}
-	}
-	if m := os.Getenv("PHASE2_RUN_MINUTE"); m != "" {
-		if v, err := strconv.Atoi(m); err == nil && v >= 0 && v <= 59 {
-			cfg.Phase2RunMinute = v
-		}
-	}
-	return cfg
-}
+// LoadConfig reads config.yaml (or CONFIG_FILE env) then overlays secrets from env.
+func LoadConfig() (*Config, error) {
+	v := viper.New()
 
-func getEnv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+	// Locate config file
+	cfgFile := os.Getenv("CONFIG_FILE")
+	if cfgFile == "" {
+		cfgFile = "config.yaml"
 	}
-	return def
-}
+	v.SetConfigFile(cfgFile)
 
-func getSaveFormat() string {
+	// Defaults
+	v.SetDefault("provider", "massive")
+	v.SetDefault("data.dir", "data")
+	v.SetDefault("data.format", "parquet")
+	v.SetDefault("data.timespan", "minute")
+	v.SetDefault("data.multiplier", 1)
+	v.SetDefault("data.backfillYears", 2)
+	v.SetDefault("schedule.runHour", 0)
+	v.SetDefault("schedule.runMinute", 30)
+	v.SetDefault("log.level", "info")
+	v.SetDefault("log.format", "text")
+
+	if err := v.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("read config file %q: %w", cfgFile, err)
+	}
+	slog.Info("loaded config", "file", v.ConfigFileUsed())
+
+	var cfg Config
+	if err := v.Unmarshal(&cfg); err != nil {
+		return nil, fmt.Errorf("unmarshal config: %w", err)
+	}
+
+	// Env overlay: API keys (secrets never live in YAML)
+	if keys := parseAPIKeysFromEnv(); len(keys) > 0 {
+		cfg.API.Keys = keys
+	}
+
+	// Env overrides for convenience
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		cfg.Log.Level = v
+	}
+	if v := os.Getenv("DATA_DIR"); v != "" {
+		cfg.Data.Dir = v
+	}
 	if v := os.Getenv("SAVE_FORMAT"); v != "" {
-		return v
+		cfg.Data.Format = v
 	}
-	switch os.Getenv("PROFILE") {
-	case "dev", "development":
-		return "csv"
-	case "prod", "production", "":
-		return "parquet"
-	default:
-		return "parquet"
+
+	if err := validateConfig(&cfg); err != nil {
+		return nil, err
 	}
+	return &cfg, nil
 }
 
-func parsePolygonAPIKeys() []string {
+var validTimespans = map[string]bool{
+	"minute": true, "hour": true, "day": true, "week": true, "month": true,
+}
+
+func validateConfig(cfg *Config) error {
+	if len(cfg.API.Keys) == 0 {
+		return fmt.Errorf("no API keys found: set POLYGON_API_KEYS env or api.keys in config.yaml")
+	}
+	format := strings.ToLower(cfg.Data.Format)
+	if format != "parquet" && format != "csv" && format != "json" {
+		return fmt.Errorf("unsupported data.format %q (allowed: parquet, csv, json)", cfg.Data.Format)
+	}
+	if !validTimespans[strings.ToLower(cfg.Data.Timespan)] {
+		return fmt.Errorf("unsupported data.timespan %q (allowed: minute, hour, day, week, month)", cfg.Data.Timespan)
+	}
+	if cfg.Data.Multiplier <= 0 {
+		return fmt.Errorf("data.multiplier must be >= 1, got %d", cfg.Data.Multiplier)
+	}
+	if cfg.Data.BackfillYears <= 0 {
+		return fmt.Errorf("data.backfillYears must be >= 1, got %d", cfg.Data.BackfillYears)
+	}
+	enabled := 0
+	for _, a := range cfg.Assets {
+		if a.Enabled {
+			enabled++
+		}
+	}
+	if enabled == 0 {
+		return fmt.Errorf("no assets enabled in config.yaml; set at least one assets[].enabled: true")
+	}
+	return nil
+}
+
+func parseAPIKeysFromEnv() []string {
 	s := os.Getenv("POLYGON_API_KEYS")
 	if s == "" {
 		s = os.Getenv("POLYGON_API_KEY")
@@ -75,19 +150,88 @@ func parsePolygonAPIKeys() []string {
 	if s == "" {
 		return nil
 	}
-	keys := strings.Split(s, ",")
-	for i := range keys {
-		keys[i] = strings.TrimSpace(keys[i])
+	parts := strings.Split(s, ",")
+	var keys []string
+	for _, p := range parts {
+		if k := strings.TrimSpace(p); k != "" {
+			keys = append(keys, k)
+		}
 	}
 	return keys
 }
 
-// SaveBaseDir returns data/Polygon
+// SaveBaseDir returns the root directory for persisted market data.
 func (c *Config) SaveBaseDir() string {
-	return filepath.Join(c.DataDir, "Polygon")
+	return filepath.Join(c.Data.Dir, "Polygon")
 }
 
-// ProgressPath returns path to .lastday.json
+// ProgressPath returns the path to the per-ticker progress file.
 func (c *Config) ProgressPath() string {
 	return filepath.Join(c.SaveBaseDir(), ".lastday.json")
+}
+
+// InitLogger installs the bootstrap logger (Info level, text format) before
+// config is loaded. Call ApplyLogger after loading config to apply the
+// configured level and format.
+func InitLogger() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: logLevel,
+	})))
+}
+
+// ApplyLogger applies the configured log level, format, and optional file output.
+// Returns a cleanup function the caller must defer to flush and close the log file.
+//
+// If log.file is set, logs are written to both stderr and the file (io.MultiWriter).
+// If the file cannot be opened, a warning is logged and stderr-only is used.
+func (c *Config) ApplyLogger() (cleanup func()) {
+	logLevel.Set(parseLevel(c.Log.Level))
+	cleanup = func() {}
+
+	w := io.Writer(os.Stderr)
+	if path := strings.TrimSpace(c.Log.File); path != "" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			slog.Warn("log file dir create failed", "path", path, "err", err)
+		} else if f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err != nil {
+			slog.Warn("log file open failed", "path", path, "err", err)
+		} else {
+			w = io.MultiWriter(os.Stderr, f)
+			cleanup = func() { _ = f.Close() }
+			slog.Info("log file opened", "path", path)
+		}
+	}
+
+	opts := &slog.HandlerOptions{Level: logLevel}
+	var handler slog.Handler
+	if strings.ToLower(strings.TrimSpace(c.Log.Format)) == "json" {
+		handler = slog.NewJSONHandler(w, opts)
+	} else {
+		handler = slog.NewTextHandler(w, opts)
+	}
+	slog.SetDefault(slog.New(handler))
+	return cleanup
+}
+
+func parseLevel(s string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// EnabledAssets returns only the asset configs that are enabled.
+func (c *Config) EnabledAssets() []AssetConfig {
+	var out []AssetConfig
+	for _, a := range c.Assets {
+		if a.Enabled {
+			out = append(out, a)
+		}
+	}
+	return out
 }

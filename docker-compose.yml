@@ -6,20 +6,14 @@ services:
     image: us-data-crawler:latest
     container_name: us-data-crawler
     environment:
-      - DATA_PROVIDER=${DATA_PROVIDER:-polygon}
-      - SAVE_FORMAT=${SAVE_FORMAT:-parquet}
-      - PROFILE=${PROFILE:-prod}
-      - POLYGON_API_KEY=${POLYGON_API_KEY}
+      # Secrets — never put API keys in config.yaml
       - POLYGON_API_KEYS=${POLYGON_API_KEYS}
-      - KEY_STRATEGY=${KEY_STRATEGY:-round-robin}
-      - STOCK_SELECTION=${STOCK_SELECTION:-file}
-      - TICKERS_FILE=${TICKERS_FILE}
-      - PHASE2_RUN_HOUR=${PHASE2_RUN_HOUR:-0}
-      - PHASE2_RUN_MINUTE=${PHASE2_RUN_MINUTE:-30}
-      - DATA_DIR=/app/data
+      # Optional overrides (values in config.yaml take effect if these are unset)
+      # - LOG_LEVEL=debug
+      # - DATA_DIR=/app/data
     volumes:
+      - ./config.yaml:/app/config.yaml:ro
       - ${DATA_DIR_HOST:-./data}:/app/data
-      - ./indices:/app/indices:ro
     restart: unless-stopped
 
 networks:
