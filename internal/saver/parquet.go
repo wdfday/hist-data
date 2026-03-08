@@ -3,7 +3,7 @@ package saver
 import (
 	"github.com/parquet-go/parquet-go"
 
-	"us-data/internal/model"
+	"hist-data/internal/model"
 )
 
 // ParquetSaver lưu packet dưới dạng Parquet.

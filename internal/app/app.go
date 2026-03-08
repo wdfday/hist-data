@@ -5,30 +5,44 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
-	"us-data/internal/crawl"
+	"hist-data/internal/crawl"
 )
 
 // Run is the top-level scheduler loop.
-//
-// Responsibility: schedule + OS signal handling only.
-// It has no knowledge of tickers, API keys, or crawl internals —
-// those are encapsulated in crawl.Runner.
-func Run(cfg *Config, fetcher crawl.BarFetcher, targets []crawl.Job) {
+// It accepts a map of provider name → BarFetcher and corresponding job lists,
+// running each provider's jobs in sequence within each scheduled cycle.
+func Run(cfg *Config, providers map[string]crawl.BarFetcher, jobsByProvider map[string][]crawl.Job) {
 	progressUpdates := make(chan crawl.ProgressUpdate, 256)
 	go crawl.RunProgressWriter(cfg.ProgressPath(), progressUpdates)
-	defer close(progressUpdates) // signals RunProgressWriter to drain and exit
+	defer close(progressUpdates)
 
-	runner := &crawl.Runner{
-		Fetcher:         fetcher,
-		APIKeys:         cfg.API.Keys,
-		Targets:         targets,
-		SaveBaseDir:     cfg.SaveBaseDir(),
-		ProgressPath:    cfg.ProgressPath(),
-		ProgressUpdates: progressUpdates,
-		BackfillYears:   cfg.Data.BackfillYears,
+	// Build runners — one per provider
+	runners := make([]*crawl.Runner, 0, len(providers))
+	for name, fetcher := range providers {
+		jobs, ok := jobsByProvider[name]
+		if !ok || len(jobs) == 0 {
+			slog.Info("no jobs for provider, skipping", "provider", name)
+			continue
+		}
+		keys := providerKeys(cfg, name)
+		if len(keys) == 0 {
+			slog.Warn("provider has 0 workers, skipping", "provider", name)
+			continue
+		}
+		runners = append(runners, &crawl.Runner{
+			Fetcher:         fetcher,
+			APIKeys:         keys,
+			Targets:         jobs,
+			SaveBaseDir:     cfg.ProviderSaveDir(name),
+			ProgressPath:    cfg.ProgressPath(),
+			ProgressUpdates: progressUpdates,
+			BackfillYears:   cfg.Data.BackfillYears,
+		})
+		slog.Info("runner ready", "provider", name, "jobs", len(jobs), "workers", len(keys))
 	}
 
 	signals := make(chan os.Signal, 1)
@@ -36,7 +50,7 @@ func Run(cfg *Config, fetcher crawl.BarFetcher, targets []crawl.Job) {
 	defer signal.Stop(signals)
 
 	for {
-		exiting := trigger(runner, signals)
+		exiting := triggerAll(runners, signals)
 		if exiting {
 			return
 		}
@@ -61,22 +75,50 @@ func Run(cfg *Config, fetcher crawl.BarFetcher, targets []crawl.Job) {
 	}
 }
 
-// trigger starts one crawl run and blocks until it finishes or a signal arrives.
-// Returns true if the process should exit.
-func trigger(runner *crawl.Runner, signals <-chan os.Signal) (shouldExit bool) {
+// triggerAll runs all runners concurrently in one cycle.
+// Each provider is fully independent (different APIs, different output dirs),
+// so they can run in parallel without coordination.
+// Returns true if the process should exit due to signal.
+func triggerAll(runners []*crawl.Runner, signals <-chan os.Signal) (shouldExit bool) {
 	ctx, cancel := context.WithCancel(context.Background())
-	doneCh := runner.Run(ctx)
 
+	// Launch all providers concurrently
+	doneChs := make([]<-chan crawl.Done, len(runners))
+	for i, runner := range runners {
+		doneChs[i] = runner.Run(ctx)
+	}
+
+	// Wait for all to finish, or cancel all on signal
+	allDone := mergeAll(doneChs)
 	select {
-	case <-doneCh:
+	case <-allDone:
 		cancel()
 		return false
 	case sig := <-signals:
-		slog.Info("cycle: signal received, finishing current jobs", "signal", sig)
+		slog.Info("cycle: signal received, cancelling all providers", "signal", sig)
 		cancel()
-		<-doneCh
+		<-allDone // drain
 		return true
 	}
+}
+
+// mergeAll returns a channel that closes once all input channels have received.
+func mergeAll(chs []<-chan crawl.Done) <-chan struct{} {
+	merged := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(len(chs))
+	for _, ch := range chs {
+		ch := ch
+		go func() {
+			<-ch
+			wg.Done()
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(merged)
+	}()
+	return merged
 }
 
 func nextCrawlRunTime(cfg *Config) time.Time {
@@ -88,4 +130,33 @@ func nextCrawlRunTime(cfg *Config) time.Time {
 	}
 	tomorrow := now.AddDate(0, 0, 1)
 	return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), hour, min, 0, 0, time.UTC)
+}
+
+// providerKeys returns the "key pool" for a provider.
+// For Massive/Polygon: real API keys (worker count = number of keys).
+// For Binance/HistData: N empty strings (key is ignored by the provider;
+// the count controls how many parallel goroutines Runner spawns).
+func providerKeys(cfg *Config, provider string) []string {
+	switch provider {
+	case "binance":
+		n := cfg.Binance.Workers
+		if n <= 0 {
+			n = 1
+		}
+		return make([]string, n) // slice of N empty strings
+	case "histdata":
+		n := cfg.HistData.Workers
+		if n <= 0 {
+			n = 1
+		}
+		return make([]string, n)
+	case "vci":
+		n := cfg.VCI.Workers
+		if n <= 0 {
+			n = 1
+		}
+		return make([]string, n)
+	default: // massive / polygon
+		return cfg.API.Keys
+	}
 }

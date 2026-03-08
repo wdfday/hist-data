@@ -1,74 +1,145 @@
-provider: massive        # massive | polygon (both point to the same API; "massive" is the new brand)
+provider: massive        # default provider when assets[].provider is omitted
 
+# ── Massive / Polygon (US Stocks, requires API key) ────────────────────────
 api:
-  # API keys for Massive/Polygon. One worker goroutine per key.
-  # Prefer setting via env: POLYGON_API_KEYS=key1,key2  (overrides this list)
+  # API keys from massive.com / polygon.io
+  # One goroutine is spawned per key → more keys = faster crawl
+  # Set via env to avoid committing secrets:  POLYGON_API_KEYS=key1,key2
+  # Free tier: 1 key, 5 requests/min (≈ 12 s cooldown between requests)
   keys: []
 
+# ── Global data settings ───────────────────────────────────────────────────
 data:
-  dir: data              # root data directory; files land in {dir}/Polygon/{class}/{ticker}/...
+  dir: data              # root output directory
   format: parquet        # parquet | csv | json
 
-  # Bar timeframe — controls the Polygon aggregates endpoint:
-  #   /v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from}/{to}
+  # Timespan + multiplier control the Polygon aggregates endpoint.
+  # Ignored by Binance and HistData (each uses its own native interval).
   timespan: minute       # minute | hour | day | week | month
-  multiplier: 5          # timeframe multiplier  (5 → 5-minute bars, 1 → 1-minute)
+  multiplier: 5          # multiplier × timespan = bar size → 5 × minute = 5-min bars
 
-  # How many years of history to fetch when a ticker has no progress entry.
-  # Larger values = more data on first run, but significantly longer backfill time.
-  #   minute bars: 2 years   ≈ 500 API calls per ticker
+  # Years of history to fetch when a ticker has no progress entry yet.
+  # Larger = longer first run. 2 years ≈ 500 API calls per Polygon ticker.
   backfillYears: 2
 
-schedule:
-  runHour: 4             # UTC hour  — 4:00 AM UTC = 11:00 AM Vietnam (UTC+7)
-  runMinute: 0           # 3h+ buffer after US extended session close (8 PM ET)
+# ── Binance (Crypto, public API — no key required) ─────────────────────────
+binance:
+  baseUrl: "https://api.binance.com"
 
+  # Bar interval sent to the Binance klines endpoint.
+  # Minimum is 1m — NO tick/trade-level data.
+  # Valid: 1m | 3m | 5m | 15m | 30m | 1h | 2h | 4h | 6h | 8h | 12h | 1d | 3d | 1w | 1M
+  interval: "5m"
+
+  # Parallel download goroutines.
+  # Memory cost: ~17-20 MB peak per worker (5-min bars, 2-year backfill).
+  # Rate limit:  Binance allows ~1200 weight/min per IP; each klines call = 2 weight.
+  #              workers=5 → ~100 req/min → safe headroom.
+  # Recommended: 3-5 (home), 5-10 (VPS). Do NOT set > 10.
+  workers: 3
+
+# ── HistData (Forex CSV, free download — no key required) ──────────────────
+histdata:
+  baseUrl: "https://www.histdata.com"
+
+  # Parallel download goroutines.
+  # Memory cost: ~3-5 MB peak per worker (1-min bars, 1 month per HTTP request).
+  # HistData throttles concurrent downloads — too many workers will get 429s or silent drops.
+  # Recommended: 2-3 (home), 3-5 (VPS). Do NOT set > 5.
+  workers: 2
+
+# ── VCI / Vietcap (Vietnamese stocks — no API key) ──────────────────────────
+# See docs/VCI.md for API details. TimeFrame: ONE_DAY | ONE_MINUTE | ONE_HOUR.
+vci:
+  baseUrl: "https://trading.vietcap.com.vn/api"
+  timeFrame: "ONE_DAY"   # daily bars; use ONE_MINUTE for ~2.5 years of minute data
+  workers: 2
+
+# ── Scheduler ──────────────────────────────────────────────────────────────
+schedule:
+  runHour: 4             # UTC hour  — 04:00 UTC = 11:00 Vietnam (UTC+7)
+  runMinute: 0           # Buffer: US markets close 8 PM ET; +8h to settle
+
+# ── Logging ────────────────────────────────────────────────────────────────
 log:
   level: info            # debug | info | warn | error
-  format: json           # text (dev) | json (production / Docker log drivers)
-  file: "data/app.log"   # optional log file path; written alongside market data
-                         # if set, logs are written to both stderr and the file
+  format: json           # text (dev) | json (production)
+  file: "data/app.log"   # also written to stderr; remove to log to stderr only
 
-# ---------------------------------------------------------------------------
-# Asset classes to crawl.
-# Each entry can define:
-#   groups   - named index constituents:
-#                sp500, nasdaq100, dji  → free (GitHub CSV / Wikipedia)
-#                russell2000, all       → ⚠ Starter+ plan required (massive.com/pricing)
-#   tickers  - explicit individual symbols; combined with groups, deduped
-#   validate - if true, each symbol is verified against the reference API
-# ---------------------------------------------------------------------------
+# ── Asset classes ──────────────────────────────────────────────────────────
+# provider field controls which data source fetches each asset:
+#   massive   — Massive/Polygon REST API  (requires api.keys above)
+#   binance   — Binance public klines      (no key, uses binance.workers)
+#   histdata  — HistData CSV download      (no key, uses histdata.workers)
+#   vci       — VCI Vietcap (VN stocks)    (no key, uses vci.workers)
+#
+# Output directories:
+#   massive  → data/Polygon/{class}/{TICKER}/
+#   binance  → data/Binance/{class}/{TICKER}/
+#   histdata → data/HistData/{class}/{TICKER}/
+#   vci      → data/VCI/{class}/{TICKER}/
 assets:
+
+  # ── US Stocks via Massive/Polygon ────────────────────────────────────────
   - class: stocks
+    provider: massive
     enabled: true
     groups:
-      - sp500            # free: loaded from GitHub CSV
-      - nasdaq100        # free: loaded from Wikipedia
-      # - dji            # free: loaded from Wikipedia
-      # - russell2000    # paid Starter+ plan required
-    tickers: []          # additional explicit symbols
+      - sp500            # ~503 stocks, free (GitHub CSV)
+      - nasdaq100        # ~101 stocks, free (Wikipedia)
+    tickers: []          # add extra symbols here
     validate: false
 
+  # ── Crypto via Binance public klines ─────────────────────────────────────
+  # Top 10 by market cap with consistent liquidity since 2019+
   - class: crypto
-    enabled: false
-    groups: []           # no named groups yet; use tickers
+    provider: binance
+    enabled: true
+    groups: []
     tickers:
-      - X:BTCUSD
-      - X:ETHUSD
-    validate: true
+      - BTCUSDT          # Bitcoin
+      - ETHUSDT          # Ethereum
+      - BNBUSDT          # BNB
+      - SOLUSDT          # Solana
+      - XRPUSDT          # XRP
+      - ADAUSDT          # Cardano
+      - AVAXUSDT         # Avalanche
+      - DOTUSDT          # Polkadot
+      - LINKUSDT         # Chainlink
+      - MATICUSDT        # Polygon (MATIC)
+    validate: false
 
+  # ── Forex via HistData CSV (1-minute bars) ────────────────────────────────
+  # Major pairs — available from ~2010, volume field is always 0 for forex
   - class: forex
-    enabled: false
+    provider: histdata
+    enabled: false   # DISABLED: HistData returns HTML instead of zip (bot protection) — see docs/HISTDATA_ISSUE.md
     groups: []
     tickers:
-      - C:EURUSD
-      - C:USDJPY
-    validate: true
+      - EURUSD           # Euro / US Dollar
+      - GBPUSD           # British Pound / US Dollar
+      - USDJPY           # US Dollar / Japanese Yen
+      - AUDUSD           # Australian Dollar / US Dollar
+      - USDCHF           # US Dollar / Swiss Franc
+    validate: false
 
+  # ── Vietnamese stocks via VCI (Vietcap) ────────────────────────────────────
+  # groups: VN30 | VN100 | HOSE | HNX | UPCOM | etc. (see docs/VCI.md)
+  - class: vn
+    provider: vci
+    enabled: true
+    groups:
+      - VN30
+      # - VN100
+    tickers: []          # or explicit: VCI, VCB, FPT, ...
+    validate: false
+
+  # ── Indices via Massive/Polygon (Starter+ plan required) ──────────────────
   - class: indices
+    provider: massive
     enabled: false
     groups: []
     tickers:
-      - I:SPX
-      - I:NDX
-    validate: false      # indices symbols are stable; skip validation
+      - I:SPX            # S&P 500
+      - I:NDX            # NASDAQ-100
+    validate: false

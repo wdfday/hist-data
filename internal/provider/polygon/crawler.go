@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"us-data/internal/model"
-	"us-data/internal/saver"
+	"hist-data/internal/model"
+	"hist-data/internal/saver"
 )
 
 const (

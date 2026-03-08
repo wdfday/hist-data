@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"os"
 
-	"us-data/internal/model"
+	"hist-data/internal/model"
 )
 
 // JSONSaver lưu packet dưới dạng JSON (array, indent).

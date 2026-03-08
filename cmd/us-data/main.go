@@ -4,25 +4,41 @@ import (
 	"log/slog"
 	"os"
 
-	"us-data/internal/app"
+	"hist-data/internal/app"
 )
 
 func main() {
-	a, err := InitializeApp()
+	app.InitLogger()
+
+	cfg, err := app.ProvideConfig()
 	if err != nil {
-		slog.Error("init failed", "error", err)
+		slog.Error("config load failed", "error", err)
 		os.Exit(1)
 	}
-	defer a.DP.Close()
+	defer cfg.ApplyLogger()()
 
-	defer a.Config.ApplyLogger()() // apply level + format + file; defer closes log file
-	slog.Info("provider", "name", a.DP.GetName(), "workers", len(a.Config.API.Keys))
+	ps, err := app.ProvidePacketSaver(cfg)
+	if err != nil {
+		slog.Error("saver init failed", "error", err)
+		os.Exit(1)
+	}
 
-	targets, err := app.ResolveTargets(a.Config)
+	// Build all providers needed by enabled assets
+	providers, err := app.ProvideProviders(cfg, ps)
+	if err != nil {
+		slog.Error("provider init failed", "error", err)
+		os.Exit(1)
+	}
+	for name := range providers {
+		slog.Info("provider ready", "name", name)
+	}
+
+	// Resolve jobs grouped by provider
+	jobsByProvider, err := app.ResolveTargetsByProvider(cfg)
 	if err != nil {
 		slog.Error("bootstrap failed", "error", err)
 		os.Exit(1)
 	}
 
-	app.Run(a.Config, a.DP, targets)
+	app.Run(cfg, providers, jobsByProvider)
 }

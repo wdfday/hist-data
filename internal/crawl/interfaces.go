@@ -3,7 +3,7 @@ package crawl
 import (
 	"time"
 
-	"us-data/internal/model"
+	"hist-data/internal/model"
 )
 
 // BarFetcher is the only interface the crawl engine depends on from the provider layer.

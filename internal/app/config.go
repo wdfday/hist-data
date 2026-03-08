@@ -18,15 +18,16 @@ var logLevel = new(slog.LevelVar) // defaults to Info
 // AssetConfig describes one asset class to crawl.
 type AssetConfig struct {
 	Class    string   `mapstructure:"class"`
+	Provider string   `mapstructure:"provider"` // massive | binance | histdata
 	Enabled  bool     `mapstructure:"enabled"`
-	Groups   []string `mapstructure:"groups"`  // sp500 | nasdaq100 | dji | all
-	Tickers  []string `mapstructure:"tickers"` // explicit individual symbols
-	Validate bool     `mapstructure:"validate"`
+	Groups   []string `mapstructure:"groups"`   // sp500 | nasdaq100 | dji | all (Polygon only)
+	Tickers  []string `mapstructure:"tickers"`  // explicit individual symbols
+	Validate bool     `mapstructure:"validate"` // verify tickers against reference API (Polygon only)
 }
 
 // Config is the application configuration loaded from config.yaml with env overrides.
 type Config struct {
-	Provider string `mapstructure:"provider"`
+	Provider string `mapstructure:"provider"` // default provider (massive)
 
 	API struct {
 		Keys []string `mapstructure:"keys"`
@@ -39,6 +40,26 @@ type Config struct {
 		Multiplier    int    `mapstructure:"multiplier"`    // e.g. 1, 5, 15
 		BackfillYears int    `mapstructure:"backfillYears"` // years of history on first run
 	} `mapstructure:"data"`
+
+	// Binance-specific config (public API, no key required)
+	Binance struct {
+		BaseURL  string `mapstructure:"baseUrl"`  // default: https://api.binance.com
+		Interval string `mapstructure:"interval"` // e.g. "1m", "5m", "1h", "1d"
+		Workers  int    `mapstructure:"workers"`  // number of parallel download goroutines
+	} `mapstructure:"binance"`
+
+	// HistData-specific config (CSV download, no key required)
+	HistData struct {
+		BaseURL string `mapstructure:"baseUrl"` // default: https://www.histdata.com
+		Workers int    `mapstructure:"workers"` // number of parallel download goroutines
+	} `mapstructure:"histdata"`
+
+	// VCI (Vietcap) — Vietnamese stocks, no API key
+	VCI struct {
+		BaseURL   string `mapstructure:"baseUrl"`   // default: https://trading.vietcap.com.vn/api
+		TimeFrame string `mapstructure:"timeFrame"` // ONE_DAY | ONE_MINUTE | ONE_HOUR
+		Workers   int    `mapstructure:"workers"`  // parallel goroutines
+	} `mapstructure:"vci"`
 
 	Schedule struct {
 		RunHour   int `mapstructure:"runHour"`
@@ -76,6 +97,14 @@ func LoadConfig() (*Config, error) {
 	v.SetDefault("schedule.runMinute", 30)
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "text")
+	v.SetDefault("binance.baseUrl", "https://api.binance.com")
+	v.SetDefault("binance.interval", "5m")
+	v.SetDefault("binance.workers", 3)
+	v.SetDefault("histdata.baseUrl", "https://www.histdata.com")
+	v.SetDefault("histdata.workers", 2)
+	v.SetDefault("vci.baseUrl", "https://trading.vietcap.com.vn/api")
+	v.SetDefault("vci.timeFrame", "ONE_DAY")
+	v.SetDefault("vci.workers", 2)
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config file %q: %w", cfgFile, err)
@@ -114,7 +143,15 @@ var validTimespans = map[string]bool{
 }
 
 func validateConfig(cfg *Config) error {
-	if len(cfg.API.Keys) == 0 {
+	// Polygon API key required only when at least one asset uses massive provider
+	needsMassive := false
+	for _, a := range cfg.Assets {
+		if a.Enabled && (a.Provider == "" || a.Provider == "massive") {
+			needsMassive = true
+			break
+		}
+	}
+	if needsMassive && len(cfg.API.Keys) == 0 {
 		return fmt.Errorf("no API keys found: set POLYGON_API_KEYS env or api.keys in config.yaml")
 	}
 	format := strings.ToLower(cfg.Data.Format)
@@ -160,9 +197,24 @@ func parseAPIKeysFromEnv() []string {
 	return keys
 }
 
-// SaveBaseDir returns the root directory for persisted market data.
+// SaveBaseDir returns the root output directory for a given provider.
+// e.g. data/Binance, data/HistData, data/Polygon
 func (c *Config) SaveBaseDir() string {
 	return filepath.Join(c.Data.Dir, "Polygon")
+}
+
+// ProviderSaveDir returns the provider-specific output directory.
+func (c *Config) ProviderSaveDir(provider string) string {
+	switch provider {
+	case "binance":
+		return filepath.Join(c.Data.Dir, "Binance")
+	case "histdata":
+		return filepath.Join(c.Data.Dir, "HistData")
+	case "vci":
+		return filepath.Join(c.Data.Dir, "VCI")
+	default: // massive / polygon
+		return filepath.Join(c.Data.Dir, "Polygon")
+	}
 }
 
 // ProgressPath returns the path to the per-ticker progress file.

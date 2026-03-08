@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"us-data/internal/model"
+	"hist-data/internal/model"
 )
 
 // BarRaw is raw bar for JSON with FlexibleInt64 for Volume and Transactions
