@@ -1,14 +1,15 @@
 # hist-data
 
-A multi-provider historical market data crawler. Fetches OHLCV bars from multiple sources and saves them as Parquet, CSV, or JSON for use in backtesting.
+A multi-provider historical market data crawler. Fetches OHLCV bars from Polygon, Binance, TwelveData, and VCI; saves them as Parquet, CSV, or JSON for use in backtesting.
 
 ## Providers
 
-| Provider              | Asset class                    | Auth             | Min granularity | Output dir       |
-| --------------------- | ------------------------------ | ---------------- | --------------- | ---------------- |
-| **Massive / Polygon** | Stocks, Indices, Crypto, Forex | API key required | 1-minute        | `data/Polygon/`  |
-| **Binance**           | Crypto                         | None (public)    | 1-minute        | `data/Binance/`  |
-| **HistData**          | Forex                          | None (free CSV)  | 1-minute        | `data/HistData/` |
+| Provider              | Asset class                       | Auth             | Min granularity | Output dir         |
+| --------------------- | --------------------------------- | ---------------- | --------------- | ------------------ |
+| **Massive / Polygon** | US Stocks, Indices, Crypto, Forex | API key required | 1-minute        | `data/Polygon/`    |
+| **Binance**           | Crypto                            | None (public)    | 1-minute        | `data/Binance/`    |
+| **TwelveData**        | Stocks, Forex, Crypto             | API key required | 1-minute        | `data/TwelveData/` |
+| **VCI (Vietcap)**     | Vietnamese stocks                 | None (public)    | 1-minute        | `data/VCI/`        |
 
 > **No tick data** — minimum bar size is 1-minute across all providers.
 
@@ -18,11 +19,12 @@ A multi-provider historical market data crawler. Fetches OHLCV bars from multipl
 
 Too many workers wastes memory; too few is slow. Here's what each worker costs at peak:
 
-| Provider     | What one worker holds in RAM            | Recommended                    |
-| ------------ | --------------------------------------- | ------------------------------ |
-| **Massive**  | ~17 MB (5-min bars, 2y per ticker)      | 1–3 keys (rate-limited anyway) |
-| **Binance**  | ~17 MB (5-min bars, 2y per ticker)      | 3–5 home · 5–10 VPS            |
-| **HistData** | ~3.5 MB (1-min bars, 1 month at a time) | 2–3 home · 3–5 VPS             |
+| Provider      | What one worker holds in RAM       | Recommended                         |
+| ------------- | ---------------------------------- | ----------------------------------- |
+| **Polygon**   | ~17 MB (5-min bars, 2y per ticker) | 1–3 keys (rate-limited per key)     |
+| **Binance**   | ~17 MB (5-min bars, 2y per ticker) | 3–5 home · 5–10 VPS                 |
+| **TwelveData**| ~17 MB (5-min bars, 2y per ticker) | 1–3 keys (rate-limited per key)     |
+| **VCI**       | ~17 MB (1-min bars, 2y per ticker) | 2–4 (no key, browser-header access) |
 
 ### Memory estimates
 
@@ -33,10 +35,7 @@ Binance 5-min bars, 2 years:
   252 trading days/yr × 2 yr × 24h × 12 bars/h = ~145 000 bars × 64 B ≈ 9 MB/ticker
   + 2× headroom for chunking buffers              ≈ 17–20 MB peak per worker
 
-HistData 1-min bars, 1 month:
-  30 days × 24h × 60 min = 43 200 bars × 64 B ≈ 2.8 MB + zip buffer ≈ 5 MB peak per worker
-
-Massive 5-min bars, 2 years:
+Polygon 5-min bars, 2 years:
   Similar to Binance                              ≈ 17–20 MB peak per worker
 ```
 
@@ -46,13 +45,12 @@ Massive 5-min bars, 2 years:
 max_workers = available_RAM_for_crawl / peak_MB_per_worker
 
 Example — 4 GB RAM, 2 GB reserved for OS/other:
-  Binance:  2000 MB / 18 MB ≈ 100   ← but Binance rate-limits at ~1200 req/min, so cap at ~10
-  HistData: 2000 MB / 5  MB ≈ 400   ← HistData server throttles, cap at ~5
+  Binance:    2000 MB / 18 MB ≈ 100   ← Binance rate-limits at ~1200 req/min, cap at ~10
+  TwelveData: rate-limited by API plan, cap workers to key count
 ```
 
 > Binance rate limit: **1200 weight/min** per IP. Each klines request uses 2 weight → ~600 req/min.
-> With 1000-bar chunks, `workers=5` fetches ~3000 chunks/min → well within limits.
-> `workers > 10` risks 429s and automatic IP bans.
+> With 1000-bar chunks, `workers=5` is well within limits. `workers > 10` risks 429s and IP bans.
 
 ---
 
@@ -64,8 +62,9 @@ flowchart TD
 
     subgraph "Providers (implement BarFetcher)"
         POL["Massive/Polygon\nBarFetcherAdapter\n─────────────────\nUS Stocks · Indices\nRequires API key\n1 goroutine per key"]
-        BIN["Binance Crawler\n─────────────────\nCrypto top-10\nPublic API\nN goroutines (workers)"]
-        HIS["HistData Crawler\n─────────────────\nForex major pairs\nFree monthly CSV\nN goroutines (workers)"]
+        BIN["Binance Crawler\n─────────────────\nCrypto\nPublic API\nN goroutines (workers)"]
+        TD["TwelveData Crawler\n─────────────────\nStocks · Forex · Crypto\nRequires API key\nN goroutines (workers)"]
+        VCI["VCI Crawler\n─────────────────\nVietnamese stocks\nPublic (browser headers)\nN goroutines (workers)"]
     end
 
     subgraph "Crawl Engine (provider-agnostic)"
@@ -74,11 +73,11 @@ flowchart TD
         SAVER["PacketSaver\nParquet · CSV · JSON"]
     end
 
-    OUT["data/\n├── Polygon/stocks/AAPL/\n├── Binance/crypto/BTCUSDT/\n└── HistData/forex/EURUSD/"]
+    OUT["data/\n├── Polygon/stocks/AAPL/\n├── Binance/crypto/BTCUSDT/\n├── TwelveData/forex/EURUSD/\n└── VCI/stocks/VNM/"]
     BT["Backtesting Engine\n(Rust / polars)"]
 
-    CFG --> POL & BIN & HIS
-    POL & BIN & HIS -->|crawl.BarFetcher| RUNNER
+    CFG --> POL & BIN & TD & VCI
+    POL & BIN & TD & VCI -->|crawl.BarFetcher| RUNNER
     PROD --> RUNNER
     RUNNER --> SAVER --> OUT
     OUT --> BT
@@ -89,10 +88,11 @@ flowchart TD
 `crawl.Runner` depends only on the `crawl.BarFetcher` interface — it never imports a concrete provider.
 
 ```
-crawl/interfaces.go  defines BarFetcher
-provider/binance/    implements it directly
-provider/histdata/   implements it directly
-provider/polygon/    implements via BarFetcherAdapter (legacy method name)
+crawl/interfaces.go   defines BarFetcher
+provider/binance/     implements it directly
+provider/twelvedata/  implements it directly
+provider/vci/         implements it directly
+provider/polygon/     implements via BarFetcherAdapter (legacy method name)
 ```
 
 ### Concurrency model
@@ -102,9 +102,10 @@ ProgressProducer goroutine
   reads .lastday.json once → resolves from/to per target → chan <- Job
 
 Worker goroutines
-  Polygon:  1 goroutine per API key (key = auth + rate-limit slot)
-  Binance:  N goroutines (binance.workers in config, no key needed)
-  HistData: N goroutines (histdata.workers in config, no key needed)
+  Polygon:     1 goroutine per API key (key = auth + rate-limit slot)
+  Binance:     N goroutines (binance.workers in config, no key needed)
+  TwelveData:  N goroutines (twelvedata.workers in config)
+  VCI:         N goroutines (vci.workers in config, no key needed)
 
   Each worker:  receive Job → FetchBars → SaveBars → write progress
 
@@ -119,10 +120,11 @@ Progress writer        → drains ProgressUpdate → .lastday.json
 
 ```bash
 cp .env.example .env
-# For Polygon/Massive assets: set POLYGON_API_KEYS=key1,key2
-# Binance and HistData need no credentials
+# Polygon/Massive assets:  set POLYGON_API_KEYS=key1,key2
+# TwelveData assets:       set TWELVEDATA_API_KEY=your_key
+# Binance and VCI need no credentials
 
-go run ./cmd/us-data/
+go run ./cmd/hist-data/
 ```
 
 ### Docker
@@ -139,47 +141,62 @@ docker compose logs -f
 
 All settings in `config.yaml`. Secrets via env — never commit API keys.
 
-| Env var            | Description                                                   |
-| ------------------ | ------------------------------------------------------------- |
-| `POLYGON_API_KEYS` | Comma-separated keys for Massive/Polygon. One worker per key. |
-| `POLYGON_API_KEY`  | Alternative single-key form.                                  |
-| `LOG_LEVEL`        | `debug` / `info` / `warn` / `error`                           |
-| `DATA_DIR`         | Override root data directory                                  |
-| `SAVE_FORMAT`      | `parquet` / `csv` / `json`                                    |
+| Env var              | Description                                                   |
+| -------------------- | ------------------------------------------------------------- |
+| `POLYGON_API_KEYS`   | Comma-separated keys for Massive/Polygon. One worker per key. |
+| `POLYGON_API_KEY`    | Alternative single-key form.                                  |
+| `TWELVEDATA_API_KEY` | API key for TwelveData.                                       |
+| `LOG_LEVEL`          | `debug` / `info` / `warn` / `error`                           |
+| `DATA_DIR`           | Override root data directory                                  |
+| `SAVE_FORMAT`        | `parquet` / `csv` / `json`                                    |
 
 ### Key config sections
 
 ```yaml
 # ── Massive/Polygon (API key required) ───────────────────────────────────
-api:
-  keys: []  # set via POLYGON_API_KEYS env  →  1 worker per key
+massive:
+  workers: 3
+  backfillYears: 2
+  schedule:
+    runHour: 18      # UTC hour to trigger daily run
+    runMinute: 0
 
-# ── Binance (no key, crypto 1m+) ─────────────────────────────────────────
+# ── Binance (no key, crypto) ──────────────────────────────────────────────
 binance:
   interval: "5m"      # 1m | 5m | 15m | 1h | 4h | 1d
-  workers: 3          # parallel goroutines
+  workers: 3
 
-# ── HistData (no key, forex 1m only) ─────────────────────────────────────
-histdata:
-  workers: 2          # parallel goroutines
+# ── TwelveData (API key required) ────────────────────────────────────────
+twelvedata:
+  interval: "5min"    # 1min | 5min | 15min | 1h | 1day
+  workers: 2
+
+# ── VCI / Vietcap (no key, Vietnamese stocks) ────────────────────────────
+vci:
+  timeFrame: "ONE_MINUTE"    # ONE_MINUTE | ONE_HOUR | ONE_DAY
+  workers: 2
 
 # ── Assets ───────────────────────────────────────────────────────────────
 assets:
   - class: stocks
-    provider: massive  # massive | binance | histdata
+    provider: massive
     enabled: true
     groups: [sp500, nasdaq100]
 
   - class: crypto
     provider: binance
     enabled: true
-    tickers: [BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT,
-              ADAUSDT, AVAXUSDT, DOTUSDT, LINKUSDT, MATICUSDT]
+    tickers: [BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT]
 
   - class: forex
-    provider: histdata
+    provider: twelvedata
     enabled: true
-    tickers: [EURUSD, GBPUSD, USDJPY, AUDUSD, USDCHF]
+    tickers: [EUR/USD, GBP/USD, USD/JPY]
+
+  - class: stocks
+    provider: vci
+    enabled: true
+    groups: [vn30, hose]
 ```
 
 ### Polygon asset groups
@@ -191,6 +208,16 @@ assets:
 | `dji`         | Wikipedia             | Free     |
 | `russell2000` | Polygon ETF API       | Starter+ |
 | `all`         | Polygon reference API | Starter+ |
+
+### VCI asset groups
+
+| Group   | Description                    |
+| ------- | ------------------------------ |
+| `vn30`  | VN30 index constituents        |
+| `hose`  | All HOSE-listed stocks         |
+| `hnx`   | All HNX-listed stocks          |
+
+> VCI native timeframes: `ONE_MINUTE`, `ONE_HOUR`, `ONE_DAY`. Minute data depth: ~2.5 years.
 
 ---
 
@@ -204,9 +231,12 @@ data/
 ├── Binance/
 │   └── crypto/BTCUSDT/
 │       └── BTCUSDT_5m_2024-01-01_to_2026-01-01.parquet
-├── HistData/
+├── TwelveData/
 │   └── forex/EURUSD/
-│       └── EURUSD_1m_2024-01-01_to_2026-01-01.parquet
+│       └── EURUSD_5min_2024-01-01_to_2026-01-01.parquet
+├── VCI/
+│   └── stocks/VNM/
+│       └── VNM_1min_2024-01-01_to_2026-01-01.parquet
 ├── .lastday.json          # progress: provider:class:TICKER → last fetched date
 ├── .lastrun.success.json
 └── .lastrun.failed.json
@@ -217,21 +247,21 @@ data/
 ## Internal package layout
 
 ```
-cmd/us-data/
+cmd/hist-data/
   main.go          entry point · wires providers and runs scheduler
 
 internal/
   app/
     config.go      Config struct · LoadConfig (Viper) · InitLogger
-    di.go          ProvideProviders: instantiates all needed BarFetchers
-    bootstrap.go   ResolveTargetsByProvider: routes assets to providers
-    app.go         Run: scheduler loop + multi-provider runner
+    di.go          buildProviders: instantiates all BarFetchers · buildPacketSaver
+    bootstrap.go   ResolveTargetsByProvider: routes assets → providers · ticker resolution
+    app.go         Run: per-provider scheduler loops
 
   crawl/
     interfaces.go  BarFetcher interface (DIP boundary)
     types.go       Job · JobResult · LogEntry · AssetClass
     producer.go    ProgressProducer: resolves from/to per target
-    runner.go      Runner: worker pool · key pool · heartbeat
+    runner.go      Runner: worker pool · key pool · heartbeat (15 min)
     progress.go    .lastday.json read/write
     report.go      .lastrun.*.json
 
@@ -239,15 +269,19 @@ internal/
     polygon/
       adapter.go   BarFetcherAdapter (bridges CrawlBarsWithKey → FetchBars)
       crawler.go   CrawlBarsWithKey: chunked Polygon API fetch
-      indices.go   ResolveAssetTickers: sp500/nasdaq100/dji/etc.
+      indices.go   ResolveAssetTickers: sp500/nasdaq100/dji/russell2000/all
     binance/
       client.go    GetKlines: public REST API, no key
       crawler.go   FetchBars + SaveBars (implements BarFetcher directly)
-    histdata/
-      client.go    GetBars: download + unzip + parse monthly CSV
+    twelvedata/
+      client.go    GetBars: TwelveData REST API
+      crawler.go   FetchBars + SaveBars (implements BarFetcher directly)
+    vci/
+      client.go    GetOHLC: Vietcap REST API (browser headers)
+      listing.go   GetAllSymbols · GetSymbolsByGroup
       crawler.go   FetchBars + SaveBars (implements BarFetcher directly)
 
-  model/  bar.go      Bar struct (OHLCV + VWAP + Transactions)
+  model/  bar.go      Bar struct (t, o, h, l, c, v, vw, n)
   saver/  *.go        PacketSaver: Parquet · CSV · JSON
 ```
 
@@ -257,8 +291,8 @@ internal/
 
 ```bash
 # Unit tests (no network)
-go test ./internal/provider/binance/...   # 7 tests
-go test ./internal/provider/histdata/...  # 9 tests
+go test ./internal/provider/binance/...
+go test ./internal/provider/twelvedata/...
 
 # Benchmark (Polygon worker concurrency)
 go test -bench=BenchmarkChanFlowQuick ./internal/provider/polygon/...
@@ -267,7 +301,7 @@ go test -bench=BenchmarkChanFlowQuick ./internal/provider/polygon/...
 go test -race ./...
 
 # Full build check
-go build ./... && go vet $(go list ./... | grep -v polygon)
+go build ./... && go vet ./...
 ```
 
 ---
@@ -275,11 +309,11 @@ go build ./... && go vet $(go list ./... | grep -v polygon)
 ## Debug
 
 ```bash
-LOG_LEVEL=debug go run ./cmd/us-data/
-go run -race ./cmd/us-data/
+LOG_LEVEL=debug go run ./cmd/hist-data/
+go run -race ./cmd/hist-data/
 ```
 
-See [docs/DEBUG.md](docs/DEBUG.md) for Docker debug commands.
+See [docs/DEBUG.md](docs/DEBUG.md) for Docker debug commands and GODEBUG flags.
 
 ---
 
