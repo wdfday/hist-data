@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 
 	"hist-data/internal/crawl"
 	"hist-data/internal/provider/polygon"
@@ -16,19 +15,15 @@ import (
 // that its BarFetcher should handle.
 func ResolveTargetsByProvider(cfg *Config) (map[string][]crawl.Job, error) {
 	apiKey := ""
-	if len(cfg.API.Keys) > 0 {
-		apiKey = cfg.API.Keys[0]
+	if len(cfg.Massive.Keys) > 0 {
+		apiKey = cfg.Massive.Keys[0]
 	}
 
 	result := make(map[string][]crawl.Job)
 
 	for _, asset := range cfg.EnabledAssets() {
-		// Determine which provider handles this asset
-		prov := strings.ToLower(strings.TrimSpace(asset.Provider))
-		if prov == "" {
-			prov = "massive" // default
-		}
-
+		key := AssetKey(asset)   // "provider:class"
+		prov := ProviderName(asset)
 		saveDir := cfg.ProviderSaveDir(prov)
 		class := crawl.AssetClass(asset.Class)
 
@@ -36,22 +31,20 @@ func ResolveTargetsByProvider(cfg *Config) (map[string][]crawl.Job, error) {
 		var err error
 
 		switch prov {
-		case "binance", "histdata":
-			// These providers use explicit tickers only — no group resolution
+		case "binance", "twelvedata":
 			tickers = asset.Tickers
-			slog.Info("tickers from config",
-				"provider", prov, "class", asset.Class, "count", len(tickers))
+			slog.Info("tickers from config", "key", key, "count", len(tickers))
 
 		case "vci":
 			tickers, err = resolveVCITickers(cfg.VCI.BaseURL, asset.Groups, asset.Tickers)
 			if err != nil {
 				return nil, fmt.Errorf("resolve vci tickers: %w", err)
 			}
-			slog.Info("tickers resolved", "provider", prov, "class", asset.Class, "count", len(tickers))
+			slog.Info("tickers resolved", "key", key, "count", len(tickers))
 
 		default: // massive / polygon
-			slog.Info("resolving tickers via Polygon",
-				"class", asset.Class, "groups", asset.Groups, "explicit", len(asset.Tickers))
+			slog.Info("resolving tickers via Polygon", "key", key,
+				"groups", asset.Groups, "explicit", len(asset.Tickers))
 			syms, err := polygon.ResolveAssetTickers(apiKey, polygon.AssetTickerSpec{
 				Class:    asset.Class,
 				Groups:   asset.Groups,
@@ -59,21 +52,21 @@ func ResolveTargetsByProvider(cfg *Config) (map[string][]crawl.Job, error) {
 				Validate: asset.Validate,
 			})
 			if err != nil {
-				return nil, fmt.Errorf("resolve %s tickers: %w", asset.Class, err)
+				return nil, fmt.Errorf("resolve %s tickers: %w", key, err)
 			}
 			tickers = syms
-			slog.Info("tickers resolved", "provider", prov, "class", class, "count", len(tickers))
+			slog.Info("tickers resolved", "key", key, "count", len(tickers))
 		}
 
 		jobs := crawl.BuildTargets(tickers, saveDir, prov, class)
-		result[prov] = append(result[prov], jobs...)
+		result[key] = append(result[key], jobs...)
 	}
 
 	total := 0
 	for _, jobs := range result {
 		total += len(jobs)
 	}
-	slog.Info("total jobs", "count", total, "providers", len(result))
+	slog.Info("total jobs", "count", total, "assets", len(result))
 
 	if err := os.MkdirAll(cfg.Data.Dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir %q: %w", cfg.Data.Dir, err)
@@ -111,16 +104,3 @@ func resolveVCITickers(baseURL string, groups, explicitTickers []string) ([]stri
 	return out, nil
 }
 
-// ResolveTargets is kept for backward compatibility with the Polygon-only flow.
-// Deprecated: use ResolveTargetsByProvider.
-func ResolveTargets(cfg *Config) ([]crawl.Job, error) {
-	byProvider, err := ResolveTargetsByProvider(cfg)
-	if err != nil {
-		return nil, err
-	}
-	var all []crawl.Job
-	for _, jobs := range byProvider {
-		all = append(all, jobs...)
-	}
-	return all, nil
-}

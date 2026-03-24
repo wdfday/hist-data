@@ -3,22 +3,18 @@ package app
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"hist-data/internal/crawl"
 	"hist-data/internal/provider/binance"
-	"hist-data/internal/provider/histdata"
 	"hist-data/internal/provider/polygon"
+	"hist-data/internal/provider/twelvedata"
 	"hist-data/internal/provider/vci"
 	"hist-data/internal/saver"
 )
 
-// ProvideConfig loads application config.
-func ProvideConfig() (*Config, error) {
-	return LoadConfig()
-}
-
-// ProvidePacketSaver constructs the bar persistence backend from config.
-func ProvidePacketSaver(cfg *Config) (saver.PacketSaver, error) {
+// buildPacketSaver constructs the bar persistence backend from config.
+func buildPacketSaver(cfg *Config) (saver.PacketSaver, error) {
 	ps := saver.NewPacketSaver(cfg.Data.Format)
 	if ps == nil {
 		return nil, fmt.Errorf("unsupported data.format %q (allowed: csv, parquet, json)", cfg.Data.Format)
@@ -26,78 +22,103 @@ func ProvidePacketSaver(cfg *Config) (saver.PacketSaver, error) {
 	return ps, nil
 }
 
-// ProvideProviders builds the map of provider name → BarFetcher based on
-// which providers have enabled assets in the config.
-// Crawlers implement crawl.BarFetcher directly — no wrapper layer needed (DIP).
-func ProvideProviders(cfg *Config, ps saver.PacketSaver) (map[string]crawl.BarFetcher, error) {
-	needed := neededProviders(cfg)
-	providers := make(map[string]crawl.BarFetcher, len(needed))
-
-	for _, name := range needed {
-		switch name {
+// buildProviders creates one BarFetcher per enabled asset.
+//
+// Map key: "provider:class"  (e.g. "massive:stocks", "binance:crypto", "vci:vn").
+// Two assets using the same provider but different intervals each get their own crawler.
+func buildProviders(cfg *Config, ps saver.PacketSaver) (map[string]crawl.BarFetcher, error) {
+	providers := make(map[string]crawl.BarFetcher)
+	for _, a := range cfg.EnabledAssets() {
+		key := AssetKey(a)
+		prov := ProviderName(a)
+		var (
+			fetcher crawl.BarFetcher
+			err     error
+		)
+		switch prov {
 		case "massive":
-			if len(cfg.API.Keys) == 0 {
-				return nil, fmt.Errorf("massive provider requires API keys (set POLYGON_API_KEYS)")
-			}
-			c, err := polygon.NewCrawler()
-			if err != nil {
-				return nil, fmt.Errorf("polygon crawler: %w", err)
-			}
-			c.SavePacketDir = cfg.ProviderSaveDir("massive")
-			c.PacketSaver = ps
-			c.Timespan = cfg.Data.Timespan
-			c.Multiplier = cfg.Data.Multiplier
-			// polygon.Crawler uses CrawlBarsWithKey (legacy name); wrap with adapter
-			providers[name] = &polygon.BarFetcherAdapter{Crawler: c}
-
+			fetcher, err = buildMassiveFetcher(cfg, a, ps)
 		case "binance":
-			c, err := binance.NewCrawler(
-				cfg.Binance.BaseURL,
-				cfg.ProviderSaveDir("binance"),
-				cfg.Binance.Interval,
-				ps,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("binance crawler: %w", err)
-			}
-			providers[name] = c
-
-		case "histdata":
-			providers[name] = histdata.NewCrawler(
-				cfg.HistData.BaseURL,
-				cfg.ProviderSaveDir("histdata"),
-				ps,
-			)
-
+			fetcher, err = buildBinanceFetcher(cfg, a, ps)
+		case "twelvedata":
+			fetcher, err = buildTwelveDataFetcher(cfg, a, ps)
 		case "vci":
-			c, err := vci.NewCrawler(
-				cfg.VCI.BaseURL,
-				cfg.ProviderSaveDir("vci"),
-				cfg.VCI.TimeFrame,
-				ps,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("vci crawler: %w", err)
-			}
-			providers[name] = c
+			fetcher, err = buildVCIFetcher(cfg, a, ps)
+		default:
+			return nil, fmt.Errorf("unknown provider %q for asset %q", prov, a.Class)
 		}
+		if err != nil {
+			return nil, fmt.Errorf("build fetcher for %s: %w", key, err)
+		}
+		providers[key] = fetcher
 	}
 	return providers, nil
 }
 
-// neededProviders returns deduplicated provider names from enabled assets.
-func neededProviders(cfg *Config) []string {
-	seen := make(map[string]bool)
-	var out []string
-	for _, a := range cfg.EnabledAssets() {
-		prov := strings.ToLower(strings.TrimSpace(a.Provider))
-		if prov == "" {
-			prov = "massive"
-		}
-		if !seen[prov] {
-			seen[prov] = true
-			out = append(out, prov)
-		}
+func buildMassiveFetcher(cfg *Config, a AssetConfig, ps saver.PacketSaver) (crawl.BarFetcher, error) {
+	timespan := "minute"
+	multiplier := 1
+	if a.Timespan != "" {
+		timespan = a.Timespan
 	}
-	return out
+	if a.Multiplier > 0 {
+		multiplier = a.Multiplier
+	}
+	c, err := polygon.NewCrawler()
+	if err != nil {
+		return nil, err
+	}
+	c.SavePacketDir = cfg.ProviderSaveDir("massive")
+	c.PacketSaver = ps
+	c.Timespan = timespan
+	c.Multiplier = multiplier
+	return &polygon.BarFetcherAdapter{Crawler: c}, nil
+}
+
+func buildBinanceFetcher(cfg *Config, a AssetConfig, ps saver.PacketSaver) (crawl.BarFetcher, error) {
+	interval := "1m"
+	if a.Interval != "" {
+		interval = a.Interval
+	}
+	return binance.NewCrawler(cfg.Binance.BaseURL, cfg.ProviderSaveDir("binance"), interval, ps)
+}
+
+func buildTwelveDataFetcher(cfg *Config, a AssetConfig, ps saver.PacketSaver) (crawl.BarFetcher, error) {
+	interval := "1min"
+	if a.Interval != "" {
+		interval = a.Interval
+	}
+	return twelvedata.NewCrawler(cfg.TwelveData.BaseURL, cfg.TwelveData.APIKey, cfg.ProviderSaveDir("twelvedata"), interval, ps)
+}
+
+func buildVCIFetcher(cfg *Config, a AssetConfig, ps saver.PacketSaver) (crawl.BarFetcher, error) {
+	timeFrame := "ONE_DAY"
+	if a.TimeFrame != "" {
+		timeFrame = a.TimeFrame
+	}
+	c, err := vci.NewCrawler(cfg.VCI.BaseURL, cfg.ProviderSaveDir("vci"), timeFrame, ps)
+	if err != nil {
+		return nil, err
+	}
+	if rl := providerRateLimit(cfg, "vci"); rl > 0 {
+		c.ChunkDelay = rl / 2
+	} else {
+		c.ChunkDelay = 500 * time.Millisecond
+	}
+	return c, nil
+}
+
+// AssetKey returns the unique pipeline key for an asset: "provider:class".
+// Examples: "massive:stocks", "binance:crypto", "vci:vn".
+func AssetKey(a AssetConfig) string {
+	return ProviderName(a) + ":" + strings.ToLower(strings.TrimSpace(a.Class))
+}
+
+// ProviderName returns the normalized provider name (empty → "massive").
+func ProviderName(a AssetConfig) string {
+	p := strings.ToLower(strings.TrimSpace(a.Provider))
+	if p == "" {
+		return "massive"
+	}
+	return p
 }

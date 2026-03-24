@@ -18,49 +18,85 @@ var logLevel = new(slog.LevelVar) // defaults to Info
 // AssetConfig describes one asset class to crawl.
 type AssetConfig struct {
 	Class    string   `mapstructure:"class"`
-	Provider string   `mapstructure:"provider"` // massive | binance | histdata
+	Provider string   `mapstructure:"provider"` // massive | binance | twelvedata | vci
 	Enabled  bool     `mapstructure:"enabled"`
 	Groups   []string `mapstructure:"groups"`   // sp500 | nasdaq100 | dji | all (Polygon only)
 	Tickers  []string `mapstructure:"tickers"`  // explicit individual symbols
 	Validate bool     `mapstructure:"validate"` // verify tickers against reference API (Polygon only)
+
+	// Per-asset interval — overrides the provider-level default when set.
+	Timespan   string `mapstructure:"timespan"`   // massive: minute|hour|day|week|month
+	Multiplier int    `mapstructure:"multiplier"` // massive: e.g. 1, 5, 15
+	Interval   string `mapstructure:"interval"`   // binance: 1m|5m|1h|1d|...
+	TimeFrame  string `mapstructure:"timeFrame"`  // vci: ONE_DAY|ONE_MINUTE|ONE_HOUR
+
+	// BackfillYears overrides the provider-level backfillYears for this asset only.
+	// 0 means use the provider default.
+	BackfillYears int `mapstructure:"backfillYears"`
 }
 
 // Config is the application configuration loaded from config.yaml with env overrides.
 type Config struct {
 	Provider string `mapstructure:"provider"` // default provider (massive)
 
-	API struct {
-		Keys []string `mapstructure:"keys"`
-	} `mapstructure:"api"`
+	// Massive / Polygon — US stocks and indices (requires API key)
+	Massive struct {
+		BaseURL       string   `mapstructure:"baseUrl"`       // default: https://api.polygon.io
+		Keys          []string `mapstructure:"keys"`          // set via POLYGON_API_KEYS env
+		Workers       int      `mapstructure:"workers"`       // parallel goroutines; 0 = one per key (default)
+		BackfillYears int      `mapstructure:"backfillYears"` // years of history on first run
+		RateLimitSec  int      `mapstructure:"rateLimit"`     // seconds between requests per worker; 0 = no limit
+		Schedule      struct {
+			RunHour   int `mapstructure:"runHour"`
+			RunMinute int `mapstructure:"runMinute"`
+		} `mapstructure:"schedule"`
+	} `mapstructure:"massive"`
 
 	Data struct {
-		Dir           string `mapstructure:"dir"`
-		Format        string `mapstructure:"format"`
-		Timespan      string `mapstructure:"timespan"`      // minute | hour | day | week | month
-		Multiplier    int    `mapstructure:"multiplier"`    // e.g. 1, 5, 15
-		BackfillYears int    `mapstructure:"backfillYears"` // years of history on first run
+		Dir    string `mapstructure:"dir"`    // root output directory
+		Format string `mapstructure:"format"` // parquet | csv | json
 	} `mapstructure:"data"`
 
-	// Binance-specific config (public API, no key required)
+	// Binance — crypto klines (public API, no key required)
 	Binance struct {
-		BaseURL  string `mapstructure:"baseUrl"`  // default: https://api.binance.com
-		Interval string `mapstructure:"interval"` // e.g. "1m", "5m", "1h", "1d"
-		Workers  int    `mapstructure:"workers"`  // number of parallel download goroutines
+		BaseURL       string `mapstructure:"baseUrl"`       // default: https://api.binance.com
+		Workers       int    `mapstructure:"workers"`       // parallel download goroutines
+		BackfillYears int    `mapstructure:"backfillYears"` // years of history on first run
+		RateLimitSec  int    `mapstructure:"rateLimit"`     // seconds between requests per worker; 0 = no limit
+		Schedule      struct {
+			RunHour   int `mapstructure:"runHour"`
+			RunMinute int `mapstructure:"runMinute"`
+		} `mapstructure:"schedule"`
 	} `mapstructure:"binance"`
 
-	// HistData-specific config (CSV download, no key required)
-	HistData struct {
-		BaseURL string `mapstructure:"baseUrl"` // default: https://www.histdata.com
-		Workers int    `mapstructure:"workers"` // number of parallel download goroutines
-	} `mapstructure:"histdata"`
+	// TwelveData — forex, stocks, ETFs, indices, crypto (requires API key)
+	// Free tier: 8 req/min, 800 credits/day. Set workers: 1 on free plan.
+	TwelveData struct {
+		BaseURL       string `mapstructure:"baseUrl"`       // default: https://api.twelvedata.com
+		APIKey        string `mapstructure:"apiKey"`        // set via TWELVEDATA_API_KEY env
+		Workers       int    `mapstructure:"workers"`       // 1 on free tier, up to 8 on paid
+		BackfillYears int    `mapstructure:"backfillYears"` // years of history on first run
+		RateLimitSec  int    `mapstructure:"rateLimit"`     // seconds between requests per worker; 0 = no limit
+		Schedule      struct {
+			RunHour   int `mapstructure:"runHour"`
+			RunMinute int `mapstructure:"runMinute"`
+		} `mapstructure:"schedule"`
+	} `mapstructure:"twelvedata"`
 
-	// VCI (Vietcap) — Vietnamese stocks, no API key
+	// VCI (Vietcap) — Vietnamese stocks (no key required)
 	VCI struct {
-		BaseURL   string `mapstructure:"baseUrl"`   // default: https://trading.vietcap.com.vn/api
-		TimeFrame string `mapstructure:"timeFrame"` // ONE_DAY | ONE_MINUTE | ONE_HOUR
-		Workers   int    `mapstructure:"workers"`  // parallel goroutines
+		BaseURL       string `mapstructure:"baseUrl"`       // default: https://trading.vietcap.com.vn/api
+		Workers       int    `mapstructure:"workers"`       // parallel goroutines
+		BackfillYears int    `mapstructure:"backfillYears"` // years of history on first run
+		RateLimitSec  int    `mapstructure:"rateLimit"`     // seconds between requests per worker; 0 = no limit
+		Schedule      struct {
+			RunHour   int `mapstructure:"runHour"`
+			RunMinute int `mapstructure:"runMinute"`
+		} `mapstructure:"schedule"`
 	} `mapstructure:"vci"`
 
+	// Schedule is the global fallback run time (UTC).
+	// Each provider can override via its own schedule block.
 	Schedule struct {
 		RunHour   int `mapstructure:"runHour"`
 		RunMinute int `mapstructure:"runMinute"`
@@ -88,23 +124,31 @@ func LoadConfig() (*Config, error) {
 
 	// Defaults
 	v.SetDefault("provider", "massive")
+	v.SetDefault("massive.baseUrl", "https://api.polygon.io")
 	v.SetDefault("data.dir", "data")
 	v.SetDefault("data.format", "parquet")
-	v.SetDefault("data.timespan", "minute")
-	v.SetDefault("data.multiplier", 1)
-	v.SetDefault("data.backfillYears", 2)
 	v.SetDefault("schedule.runHour", 0)
 	v.SetDefault("schedule.runMinute", 30)
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "text")
 	v.SetDefault("binance.baseUrl", "https://api.binance.com")
-	v.SetDefault("binance.interval", "5m")
 	v.SetDefault("binance.workers", 3)
-	v.SetDefault("histdata.baseUrl", "https://www.histdata.com")
-	v.SetDefault("histdata.workers", 2)
+	v.SetDefault("twelvedata.baseUrl", "https://api.twelvedata.com")
+	v.SetDefault("twelvedata.workers", 1)
 	v.SetDefault("vci.baseUrl", "https://trading.vietcap.com.vn/api")
-	v.SetDefault("vci.timeFrame", "ONE_DAY")
 	v.SetDefault("vci.workers", 2)
+
+	// Bind env vars — picked up automatically by Unmarshal.
+	// Secrets are never in YAML; they live only in env.
+	_ = v.BindEnv("twelvedata.apiKey", "TWELVEDATA_API_KEY")
+	_ = v.BindEnv("log.level", "LOG_LEVEL")
+	_ = v.BindEnv("data.dir", "DATA_DIR")
+	_ = v.BindEnv("data.format", "SAVE_FORMAT")
+
+	// POLYGON_API_KEYS needs special handling: comma-split + singular fallback.
+	if keys := parseAPIKeysFromEnv(); len(keys) > 0 {
+		v.Set("massive.keys", keys)
+	}
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config file %q: %w", cfgFile, err)
@@ -114,22 +158,6 @@ func LoadConfig() (*Config, error) {
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
-	}
-
-	// Env overlay: API keys (secrets never live in YAML)
-	if keys := parseAPIKeysFromEnv(); len(keys) > 0 {
-		cfg.API.Keys = keys
-	}
-
-	// Env overrides for convenience
-	if v := os.Getenv("LOG_LEVEL"); v != "" {
-		cfg.Log.Level = v
-	}
-	if v := os.Getenv("DATA_DIR"); v != "" {
-		cfg.Data.Dir = v
-	}
-	if v := os.Getenv("SAVE_FORMAT"); v != "" {
-		cfg.Data.Format = v
 	}
 
 	if err := validateConfig(&cfg); err != nil {
@@ -142,35 +170,41 @@ var validTimespans = map[string]bool{
 	"minute": true, "hour": true, "day": true, "week": true, "month": true,
 }
 
+var validVCITimeFrames = map[string]bool{
+	"ONE_DAY": true, "ONE_MINUTE": true, "ONE_HOUR": true,
+}
+
 func validateConfig(cfg *Config) error {
-	// Polygon API key required only when at least one asset uses massive provider
-	needsMassive := false
-	for _, a := range cfg.Assets {
-		if a.Enabled && (a.Provider == "" || a.Provider == "massive") {
-			needsMassive = true
-			break
-		}
-	}
-	if needsMassive && len(cfg.API.Keys) == 0 {
-		return fmt.Errorf("no API keys found: set POLYGON_API_KEYS env or api.keys in config.yaml")
-	}
 	format := strings.ToLower(cfg.Data.Format)
 	if format != "parquet" && format != "csv" && format != "json" {
 		return fmt.Errorf("unsupported data.format %q (allowed: parquet, csv, json)", cfg.Data.Format)
 	}
-	if !validTimespans[strings.ToLower(cfg.Data.Timespan)] {
-		return fmt.Errorf("unsupported data.timespan %q (allowed: minute, hour, day, week, month)", cfg.Data.Timespan)
-	}
-	if cfg.Data.Multiplier <= 0 {
-		return fmt.Errorf("data.multiplier must be >= 1, got %d", cfg.Data.Multiplier)
-	}
-	if cfg.Data.BackfillYears <= 0 {
-		return fmt.Errorf("data.backfillYears must be >= 1, got %d", cfg.Data.BackfillYears)
-	}
+
 	enabled := 0
 	for _, a := range cfg.Assets {
-		if a.Enabled {
-			enabled++
+		if !a.Enabled {
+			continue
+		}
+		enabled++
+		prov := strings.ToLower(strings.TrimSpace(a.Provider))
+		if prov == "" {
+			prov = "massive"
+		}
+		switch prov {
+		case "massive":
+			if len(cfg.Massive.Keys) == 0 {
+				return fmt.Errorf("asset %q uses massive provider but no API keys found: set POLYGON_API_KEYS env", a.Class)
+			}
+			if a.Timespan != "" && !validTimespans[strings.ToLower(a.Timespan)] {
+				return fmt.Errorf("asset %q: unsupported timespan %q (allowed: minute, hour, day, week, month)", a.Class, a.Timespan)
+			}
+			if a.Multiplier < 0 {
+				return fmt.Errorf("asset %q: multiplier must be >= 1, got %d", a.Class, a.Multiplier)
+			}
+		case "vci":
+			if a.TimeFrame != "" && !validVCITimeFrames[a.TimeFrame] {
+				return fmt.Errorf("asset %q: unsupported timeFrame %q (allowed: ONE_DAY, ONE_MINUTE, ONE_HOUR)", a.Class, a.TimeFrame)
+			}
 		}
 	}
 	if enabled == 0 {
@@ -198,7 +232,7 @@ func parseAPIKeysFromEnv() []string {
 }
 
 // SaveBaseDir returns the root output directory for a given provider.
-// e.g. data/Binance, data/HistData, data/Polygon
+// e.g. data/Binance, data/TwelveData, data/Polygon
 func (c *Config) SaveBaseDir() string {
 	return filepath.Join(c.Data.Dir, "Polygon")
 }
@@ -208,8 +242,8 @@ func (c *Config) ProviderSaveDir(provider string) string {
 	switch provider {
 	case "binance":
 		return filepath.Join(c.Data.Dir, "Binance")
-	case "histdata":
-		return filepath.Join(c.Data.Dir, "HistData")
+	case "twelvedata":
+		return filepath.Join(c.Data.Dir, "TwelveData")
 	case "vci":
 		return filepath.Join(c.Data.Dir, "VCI")
 	default: // massive / polygon
@@ -217,9 +251,14 @@ func (c *Config) ProviderSaveDir(provider string) string {
 	}
 }
 
-// ProgressPath returns the path to the per-ticker progress file.
+// ProgressPath returns the Polygon progress file path (kept for compatibility).
 func (c *Config) ProgressPath() string {
-	return filepath.Join(c.SaveBaseDir(), ".lastday.json")
+	return c.ProviderProgressPath("massive")
+}
+
+// ProviderProgressPath returns the progress file path for a given provider.
+func (c *Config) ProviderProgressPath(provider string) string {
+	return filepath.Join(c.ProviderSaveDir(provider), ".lastday.json")
 }
 
 // InitLogger installs the bootstrap logger (Info level, text format) before

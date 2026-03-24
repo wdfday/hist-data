@@ -17,10 +17,13 @@ const MaxBarsPerRequest = 30000
 // Crawler fetches OHLCV bars from VCI (Vietcap) and persists them.
 // Supports ONE_DAY and ONE_MINUTE; ONE_HOUR can be added if needed.
 type Crawler struct {
-	client         *Client
-	TimeFrame      string // ONE_DAY | ONE_MINUTE | ONE_HOUR
-	SavePacketDir  string
-	PacketSaver    saver.PacketSaver
+	client        *Client
+	TimeFrame     string // ONE_DAY | ONE_MINUTE | ONE_HOUR
+	SavePacketDir string
+	PacketSaver   saver.PacketSaver
+	// ChunkDelay is the sleep between paginated requests for a single symbol.
+	// VCI has an undocumented rate limit; 500ms between chunks avoids 429s.
+	ChunkDelay time.Duration
 }
 
 // NewCrawler creates a VCI crawler. timeFrame must be ONE_DAY, ONE_MINUTE, or ONE_HOUR.
@@ -65,7 +68,12 @@ func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, 
 	case TimeFrameMinute, TimeFrameHour:
 		chunk := MaxBarsPerRequest
 		curTo := toSec
+		first := true
 		for {
+			if !first && c.ChunkDelay > 0 {
+				time.Sleep(c.ChunkDelay)
+			}
+			first = false
 			bars, err := c.client.GetOHLC(c.TimeFrame, []string{symbol}, curTo, chunk)
 			if err != nil {
 				return nil, err
@@ -75,8 +83,9 @@ func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, 
 			}
 			filtered := filterBarsInRange(bars, from, to)
 			all = append(all, filtered...)
-			// Next chunk: move curTo to before the oldest bar we got
-			oldestTs := bars[len(bars)-1].Timestamp
+			// VCI returns bars in ascending order (oldest first).
+			// Use bars[0] (oldest) to advance curTo backward.
+			oldestTs := bars[0].Timestamp
 			if oldestTs/1000 >= curTo {
 				break
 			}

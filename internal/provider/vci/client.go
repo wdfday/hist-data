@@ -132,6 +132,21 @@ func seriesToBars(s GapChartSeries) []model.Bar {
 	return bars
 }
 
+// LastTradingDay returns the most recent VN trading day by fetching the
+// latest ONE_DAY bar for VNM (a liquid reference ticker on HOSE).
+// Returns zero time if VCI is unreachable or returns no data.
+func (c *Client) LastTradingDay() (time.Time, error) {
+	bars, err := c.GetOHLC(TimeFrameDay, []string{"VNM"}, time.Now().Unix(), 1)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if len(bars) == 0 {
+		return time.Time{}, nil
+	}
+	ts := time.UnixMilli(bars[0].Timestamp).UTC()
+	return time.Date(ts.Year(), ts.Month(), ts.Day(), 0, 0, 0, 0, time.UTC), nil
+}
+
 // GetSymbolsByGroup returns symbols for a group (e.g. "VN30", "HOSE").
 func (c *Client) GetSymbolsByGroup(group string) ([]string, error) {
 	url := fmt.Sprintf("%s%s?group=%s", c.baseURL, symbolsByGroupPath, group)

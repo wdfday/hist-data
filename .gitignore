@@ -11,9 +11,8 @@ main
 *.so
 *.dylib
 /vendor/
-
 # Crawled data
-data/
+/data/*
 
 # Generated
 tickers.json

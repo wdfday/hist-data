@@ -9,22 +9,23 @@ import (
 
 // Runner orchestrates one full crawl cycle.
 //
-//	ProgressProducer → <-chan Job → workers (key pool) → results + logs channels
-//	                                                    ↓               ↓
-//	                                             result collector   log writer
+//	ProgressProducer → <-chan Job → workers (one per key) → results + logs channels
+//	                                                       ↓               ↓
+//	                                                result collector   log writer
 //
 // Separation of concerns:
 //   - Producer : reads progress once, resolves from/to per target, pushes fully-resolved Jobs
 //   - Worker   : pure compute — sends JobResult and LogEntry through channels, never calls slog
 //   - Log writer: single goroutine drains the log channel and calls slog (ordered output)
 type Runner struct {
-	Fetcher         BarFetcher
-	APIKeys         []string
-	Targets         []Job
-	ProgressPath    string
-	SaveBaseDir     string
-	ProgressUpdates chan<- ProgressUpdate
-	BackfillYears   int // passed to ProgressProducer; 0 → default 2
+	Fetcher       BarFetcher
+	APIKeys       []string
+	Targets       []Job
+	ProgressPath  string
+	SaveBaseDir   string
+	BackfillYears int           // passed to ProgressProducer
+	AsOf          time.Time     // last date to include; zero = yesterday
+	RateLimit     time.Duration // minimum delay between requests per worker; 0 = no limit
 }
 
 // Run starts one crawl cycle asynchronously and returns a channel that receives
@@ -36,17 +37,28 @@ func (r *Runner) Run(ctx context.Context) <-chan Done {
 }
 
 func (r *Runner) execute(ctx context.Context, done chan<- Done) {
-	defer func() { done <- Done{} }()
+	defer func() {
+		if rc := recover(); rc != nil {
+			slog.Error("runner panicked", "targets", len(r.Targets), "panic", rc)
+		}
+		done <- Done{}
+	}()
 
 	start := time.Now().UTC()
 	slog.Info("cycle start", "targets", len(r.Targets), "workers", len(r.APIKeys))
 
+	// Each runner owns its progress writer — no shared channel needed.
+	progressUpdates := make(chan ProgressUpdate, 256)
+	go RunProgressWriter(r.ProgressPath, progressUpdates)
+	defer close(progressUpdates)
+
 	// Bootstrap must run before producer reads progress, so every target has an entry.
-	BootstrapProgress(r.ProgressPath, r.Targets, start)
+	BootstrapProgress(r.ProgressPath, r.Targets, start, r.BackfillYears)
 
 	producer := NewProgressProducer(r.Targets, r.ProgressPath, r.BackfillYears)
+	producer.AsOf = r.AsOf
 	jobCh := producer.Start(ctx)
-	successes, failures := r.runWorkers(ctx, jobCh)
+	successes, failures := r.runWorkers(ctx, jobCh, progressUpdates)
 
 	slog.Info("cycle done",
 		"success", len(successes), "failed", len(failures),
@@ -60,13 +72,9 @@ func (r *Runner) execute(ctx context.Context, done chan<- Done) {
 }
 
 // runWorkers fans jobs out to N workers (one per API key) and collects results.
+// Each worker owns its key — no shared key pool needed.
 // Workers communicate exclusively through channels — no direct slog calls.
-func (r *Runner) runWorkers(ctx context.Context, jobCh <-chan Job) (successes []string, failures []failedEntry) {
-	keyPool := make(chan string, len(r.APIKeys))
-	for _, k := range r.APIKeys {
-		keyPool <- k
-	}
-
+func (r *Runner) runWorkers(ctx context.Context, jobCh <-chan Job, progressUpdates chan<- ProgressUpdate) (successes []string, failures []failedEntry) {
 	results := make(chan JobResult, 256)
 	logs := make(chan LogEntry, 512)
 
@@ -114,21 +122,39 @@ func (r *Runner) runWorkers(ctx context.Context, jobCh <-chan Job) (successes []
 	defer hbCancel()
 	go runHeartbeat(hbCtx, 15*time.Minute, &mu, &successCount, &failedCount, barsPerTicker)
 
-	// --- workers ---
+	// --- workers: each goroutine owns its API key ---
 	var wg sync.WaitGroup
 	wg.Add(len(r.APIKeys))
-	for range r.APIKeys {
+	for _, key := range r.APIKeys {
+		key := key
 		go func() {
 			defer wg.Done()
 			for {
 				select {
 				case <-ctx.Done():
 					return
-				case job, open := <-jobCh:
-					if !open {
+				case job, ok := <-jobCh:
+					if !ok {
 						return
 					}
-					r.processJob(job, keyPool, results, logs)
+					func() {
+						defer func() {
+							if rc := recover(); rc != nil {
+								logs <- LogEntry{slog.LevelError, "worker panicked", []any{
+									"ticker", job.Ticker, "panic", rc,
+								}}
+								results <- JobResult{Ok: false, Ticker: job.Ticker, Reason: "panic"}
+							}
+						}()
+						r.processJob(job, key, results, logs, progressUpdates)
+					}()
+					if r.RateLimit > 0 {
+						select {
+						case <-time.After(r.RateLimit):
+						case <-ctx.Done():
+							return
+						}
+					}
 				}
 			}
 		}()
@@ -147,16 +173,14 @@ func (r *Runner) runWorkers(ctx context.Context, jobCh <-chan Job) (successes []
 // processJob fetches and saves bars for a fully-resolved Job.
 // All output goes through channels — results to resultCh, logs to logs.
 // This goroutine never calls slog directly.
-func (r *Runner) processJob(job Job, keyPool chan string, results chan<- JobResult, logs chan<- LogEntry) {
+func (r *Runner) processJob(job Job, key string, results chan<- JobResult, logs chan<- LogEntry, progressUpdates chan<- ProgressUpdate) {
 	fromStr := job.From.Format("2006-01-02")
 	toStr := job.To.Format("2006-01-02")
 
-	key := <-keyPool
 	keyPfx := key
 	if len(key) > 8 {
 		keyPfx = key[:8] + "…"
 	}
-	defer func() { keyPool <- key }()
 
 	logs <- LogEntry{slog.LevelInfo, "fetch start", []any{
 		"ticker", job.Ticker, "class", job.Class,
@@ -198,7 +222,7 @@ func (r *Runner) processJob(job Job, keyPool chan string, results chan<- JobResu
 		}
 
 		select {
-		case r.ProgressUpdates <- ProgressUpdate{
+		case progressUpdates <- ProgressUpdate{
 			Source: job.Source, Class: job.Class,
 			Ticker: job.Ticker, Date: toStr,
 		}:

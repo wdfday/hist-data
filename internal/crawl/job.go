@@ -32,15 +32,17 @@ func BuildTargets(tickers []string, saveBaseDir, source string, class AssetClass
 // resolveJobRange computes the date range [from, to] that still needs to be
 // fetched for target, given a pre-loaded progress map.
 //
+// asOf is the last calendar date to include (e.g. last trading day or yesterday).
+//
 // Rules:
-//   - no progress entry → backfill backfillYears of history ending yesterday
-//   - has entry         → fetch from lastday+1 to yesterday
+//   - no progress entry → backfill backfillYears of history ending asOf
+//   - has entry         → fetch from lastday+1 to asOf
 //   - already up to date → skip=true
 //
 // Chunk splitting and rate-limiting are handled inside CrawlBarsWithKey.
-func resolveJobRange(target Job, m map[string]string, now time.Time, backfillYears int) (from, to time.Time, skip bool) {
-	yesterday := date(now).AddDate(0, 0, -1)
-	endOfYesterday := yesterday.Add(24*time.Hour - time.Millisecond)
+func resolveJobRange(target Job, m map[string]string, asOf time.Time, backfillYears int) (from, to time.Time, skip bool) {
+	asOf = date(asOf)
+	endOfAsOf := asOf.Add(24*time.Hour - time.Millisecond)
 
 	key := progressKey(target.Source, target.Class, target.Ticker)
 	last, ok := m[key]
@@ -52,19 +54,16 @@ func resolveJobRange(target Job, m map[string]string, now time.Time, backfillYea
 	}
 
 	if !ok {
-		if backfillYears <= 0 {
-			backfillYears = 2
-		}
-		from = time.Date(now.Year()-backfillYears, now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-		return from, endOfYesterday, false
+		from = time.Date(asOf.Year()-backfillYears, asOf.Month(), asOf.Day(), 0, 0, 0, 0, time.UTC)
+		return from, endOfAsOf, false
 	}
 
 	lastDay, _ := time.ParseInLocation("2006-01-02", last, time.UTC)
 	startDate := date(lastDay).AddDate(0, 0, 1)
-	if !startDate.Before(yesterday) && !startDate.Equal(yesterday) {
+	if !startDate.Before(asOf) && !startDate.Equal(asOf) {
 		return time.Time{}, time.Time{}, true // already up to date
 	}
-	return startDate, endOfYesterday, false
+	return startDate, endOfAsOf, false
 }
 
 // ---------------------------------------------------------------------------

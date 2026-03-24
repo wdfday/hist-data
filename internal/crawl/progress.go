@@ -57,15 +57,14 @@ func saveProgress(path string, m map[string]string) error {
 
 // BootstrapProgress ensures that progress file has an entry for every Job
 // identity (Source/Class/Ticker). For missing ones it seeds last-day so that
-// the next crawl starts from 2 years ago.
-func BootstrapProgress(path string, targets []Job, now time.Time) {
+// the next crawl starts from backfillYears ago.
+func BootstrapProgress(path string, targets []Job, now time.Time, backfillYears int) {
 	m := loadProgress(path)
 	if m == nil {
 		m = make(map[string]string)
 	}
 
-	// Seed so that next crawl starts from (now - 2y)
-	start := time.Date(now.Year()-2, now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	start := time.Date(now.Year()-backfillYears, now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	seedLast := start.AddDate(0, 0, -1).Format("2006-01-02") // last + 1 = start
 
 	added := 0

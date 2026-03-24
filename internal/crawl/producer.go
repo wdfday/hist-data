@@ -16,7 +16,8 @@ import (
 type ProgressProducer struct {
 	Targets       []Job
 	ProgressPath  string
-	BackfillYears int // years of history to fetch on first run (default: 2)
+	BackfillYears int       // years of history to fetch on first run (default: 2)
+	AsOf          time.Time // last date to include; zero = yesterday (UTC)
 }
 
 // NewProgressProducer constructs a ProgressProducer.
@@ -33,11 +34,14 @@ func (p *ProgressProducer) Start(ctx context.Context) <-chan Job {
 	out := make(chan Job, 64)
 	go func() {
 		defer close(out)
-		now := time.Now().UTC()
+		asOf := p.AsOf
+		if asOf.IsZero() {
+			asOf = date(time.Now().UTC()).AddDate(0, 0, -1) // default: yesterday
+		}
 		m := loadProgress(p.ProgressPath) // single read for all targets
 		pending, skipped := 0, 0
 		for _, target := range p.Targets {
-			from, to, skip := resolveJobRange(target, m, now, p.BackfillYears)
+			from, to, skip := resolveJobRange(target, m, asOf, p.BackfillYears)
 			if skip {
 				skipped++
 				continue

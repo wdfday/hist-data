@@ -158,7 +158,8 @@ func (c *Crawler) Close() error {
 // If dir is empty or PacketSaver is nil, the call is a no-op.
 //
 // File name format: {ticker}_{timespan}_{from}.{ext}  (per-day)
-//                   {ticker}_{timespan}_{from}_to_{to}.{ext}  (range)
+//
+//	{ticker}_{timespan}_{from}_to_{to}.{ext}  (range)
 func (c *Crawler) SaveBars(dir, ticker string, from, to time.Time, bars []model.Bar) {
 	if dir == "" || c.PacketSaver == nil || len(bars) == 0 {
 		return
@@ -301,6 +302,37 @@ func (c *Crawler) doAggregatesRequest(client *http.Client, req *http.Request, on
 		return &result, nil
 	}
 	return nil, fmt.Errorf("no response")
+}
+
+// LastTradingDay returns the most recent NYSE trading day by fetching
+// the latest 1-day bar for SPY. Uses the first available API key.
+// Returns zero time if the key is empty or the request fails.
+func LastTradingDay(apiKey string) (time.Time, error) {
+	if apiKey == "" {
+		return time.Time{}, fmt.Errorf("polygon: no API key for last trading day query")
+	}
+	now := time.Now().UTC()
+	from := now.AddDate(0, 0, -7).UnixMilli()
+	to := now.UnixMilli()
+	rawURL := fmt.Sprintf("%s/v2/aggs/ticker/SPY/range/1/day/%d/%d?sort=desc&limit=1&apiKey=%s",
+		polygonBaseURL, from, to, apiKey)
+	resp, err := http.Get(rawURL) //nolint:noctx
+	if err != nil {
+		return time.Time{}, fmt.Errorf("polygon last trading day: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return time.Time{}, fmt.Errorf("polygon last trading day: HTTP %d", resp.StatusCode)
+	}
+	var result AggregatesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return time.Time{}, fmt.Errorf("polygon last trading day decode: %w", err)
+	}
+	if len(result.Results) == 0 {
+		return time.Time{}, nil
+	}
+	ts := time.UnixMilli(result.Results[0].Timestamp).UTC()
+	return time.Date(ts.Year(), ts.Month(), ts.Day(), 0, 0, 0, 0, time.UTC), nil
 }
 
 // CrawlBarsWithKey fetches bar aggregates for the given ticker and time range using

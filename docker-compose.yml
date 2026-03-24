@@ -1,16 +1,20 @@
 services:
-  crawler:
+  hist-data:
     build:
       context: .
       dockerfile: Dockerfile
-    image: us-data-crawler:latest
-    container_name: us-data-crawler
+    image: hist-data:latest
+    container_name: hist-data
     environment:
-      # Secrets — never put API keys in config.yaml
-      - POLYGON_API_KEYS=${POLYGON_API_KEYS}
-      # Optional overrides (values in config.yaml take effect if these are unset)
+      # ── Secrets — never put API keys in config.yaml ────────────────────────
+      # Polygon.io (massive): comma-separated, one goroutine per key
+      - POLYGON_API_KEYS=${POLYGON_API_KEYS:-}
+      # TwelveData: forex + multi-asset (disabled by default in config.yaml)
+      - TWELVEDATA_API_KEY=${TWELVEDATA_API_KEY:-}
+      # ── Optional runtime overrides ─────────────────────────────────────────
       # - LOG_LEVEL=debug
       # - DATA_DIR=/app/data
+      # - SAVE_FORMAT=parquet
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ${DATA_DIR_HOST:-./data}:/app/data
@@ -18,4 +22,4 @@ services:
 
 networks:
   default:
-    name: us-data-network
+    name: hist-data-network
