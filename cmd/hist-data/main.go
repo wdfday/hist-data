@@ -1,26 +1,16 @@
 package main
 
 import (
-	"log/slog"
-	"os"
+	"context"
+	"os/signal"
+	"syscall"
 
 	"hist-data/internal/app"
 )
 
 func main() {
-	app.InitLogger()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	cfg, err := app.LoadConfig()
-	if err != nil {
-		slog.Error("config load failed", "error", err)
-		os.Exit(1)
-	}
-	defer cfg.ApplyLogger()()
-
-	a, err := app.NewApp(cfg)
-	if err != nil {
-		slog.Error("init failed", "error", err)
-		os.Exit(1)
-	}
-	a.Run()
+	app.Run(ctx)
 }

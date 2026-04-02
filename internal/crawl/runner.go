@@ -3,6 +3,7 @@ package crawl
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 )
@@ -258,10 +259,8 @@ func logSummary(barsPerTicker, barsPerKey map[string]int, failures []failedEntry
 }
 
 func appendUniq(list []string, ticker string) []string {
-	for _, t := range list {
-		if t == ticker {
-			return list
-		}
+	if slices.Contains(list, ticker) {
+		return list
 	}
 	return append(list, ticker)
 }

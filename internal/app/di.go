@@ -64,15 +64,8 @@ func buildMassiveFetcher(cfg *Config, a AssetConfig, ps saver.PacketSaver) (craw
 	if a.Multiplier > 0 {
 		multiplier = a.Multiplier
 	}
-	c, err := polygon.NewCrawler()
-	if err != nil {
-		return nil, err
-	}
-	c.SavePacketDir = cfg.ProviderSaveDir("massive")
-	c.PacketSaver = ps
-	c.Timespan = timespan
-	c.Multiplier = multiplier
-	return &polygon.BarFetcherAdapter{Crawler: c}, nil
+
+	return polygon.NewCrawler(cfg.ProviderSaveDir("masssive"), timespan, multiplier, ps)
 }
 
 func buildBinanceFetcher(cfg *Config, a AssetConfig, ps saver.PacketSaver) (crawl.BarFetcher, error) {

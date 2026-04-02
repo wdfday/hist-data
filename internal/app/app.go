@@ -4,10 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"hist-data/internal/crawl"
@@ -49,27 +47,37 @@ func NewApp(cfg *Config) (*App, error) {
 	}, nil
 }
 
-// Run starts all provider schedulers and waits until a signal is received.
+// Run wires the application and blocks until ctx is cancelled.
+// Initialises logging, loads config, constructs all providers, then starts
+// per-provider scheduler goroutines. Intended to be called from main with a
+// signal-aware context.
+func Run(ctx context.Context) {
+	InitLogger()
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		slog.Error("config load failed", "error", err)
+		os.Exit(1)
+	}
+	defer cfg.ApplyLogger()()
+
+	a, err := NewApp(cfg)
+	if err != nil {
+		slog.Error("init failed", "error", err)
+		os.Exit(1)
+	}
+	a.run(ctx)
+}
+
+// run starts all provider schedulers and blocks until ctx is cancelled.
 // Each provider gets its own independent goroutine with its own scheduler loop,
 // gate logic, and state — no shared scheduling between providers.
-func (a *App) Run() {
+func (a *App) run(ctx context.Context) {
 	groups := buildGroups(a.cfg, a.providers, a.jobsByProvider)
 	if len(groups) == 0 {
 		slog.Error("no provider groups configured")
 		return
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(signals)
-	go func() {
-		sig := <-signals
-		slog.Info("scheduler: shutting down", "signal", sig)
-		cancel()
-	}()
 
 	var wg sync.WaitGroup
 	for _, g := range groups {

@@ -47,7 +47,7 @@ vci:
   baseUrl: "https://trading.vietcap.com.vn/api"
   workers: 1            # 1 worker to avoid 429; VCI rate-limits aggressively
   backfillYears: 3      # VCI: ~2.5y available for minute data
-  rateLimit: 1          # 1s between tickers; each ticker already makes ~10 HTTP calls (30k bars/req)
+  rateLimit: 3          # 1s between tickers; each ticker already makes ~10 HTTP calls (30k bars/req)
   schedule:
     runHour: 9          # UTC — 09:00 UTC = 16:00 Vietnam; HOSE closes 15:00 local
     runMinute: 30

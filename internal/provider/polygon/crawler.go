@@ -153,38 +153,6 @@ func (c *Crawler) Close() error {
 	return nil
 }
 
-// SaveBars persists bars into dir/ticker/ using the configured PacketSaver.
-// dir is the asset-class-specific directory (e.g. data/Polygon/stocks).
-// If dir is empty or PacketSaver is nil, the call is a no-op.
-//
-// File name format: {ticker}_{timespan}_{from}.{ext}  (per-day)
-//
-//	{ticker}_{timespan}_{from}_to_{to}.{ext}  (range)
-func (c *Crawler) SaveBars(dir, ticker string, from, to time.Time, bars []model.Bar) {
-	if dir == "" || c.PacketSaver == nil || len(bars) == 0 {
-		return
-	}
-	tickerDir := filepath.Join(dir, ticker)
-	if err := os.MkdirAll(tickerDir, 0755); err != nil {
-		slog.Error("save: mkdir failed", "ticker", ticker, "dir", tickerDir, "err", err)
-		return
-	}
-	ext := c.PacketSaver.Extension()
-	ts := c.timespanLabel()
-	var name string
-	if c.SavePerDay {
-		name = fmt.Sprintf("%s_%s_%s.%s", ticker, ts, from.Format("2006-01-02"), ext)
-	} else {
-		name = fmt.Sprintf("%s_%s_%s_to_%s.%s", ticker, ts, from.Format("2006-01-02"), to.Format("2006-01-02"), ext)
-	}
-	packetPath := filepath.Join(tickerDir, name)
-	if err := c.PacketSaver.Save(bars, packetPath); err != nil {
-		slog.Error("save: write failed", "ticker", ticker, "path", packetPath, "err", err)
-	} else {
-		slog.Info("save ok", "ticker", ticker, "format", ext, "path", packetPath, "bars", len(bars))
-	}
-}
-
 // splitDateRangeIntoChunks splits [from, to] into day chunks so each request stays under ~maxLimit bars
 func splitDateRangeIntoChunks(from, to time.Time, maxDays int) [][2]time.Time {
 	var chunks [][2]time.Time
@@ -338,7 +306,7 @@ func LastTradingDay(apiKey string) (time.Time, error) {
 // CrawlBarsWithKey fetches bar aggregates for the given ticker and time range using
 // the provided API key. The timeframe is determined by Crawler.Timespan and Crawler.Multiplier.
 // Callers are responsible for API-key rotation and rate limiting.
-func (c *Crawler) CrawlBarsWithKey(ticker, apiKey string, from, to time.Time) ([]model.Bar, error) {
+func (c *Crawler) FetchBars(ticker, apiKey string, from, to time.Time) ([]model.Bar, error) {
 	client := c.client
 	if client == nil {
 		client = http.DefaultClient
@@ -394,4 +362,36 @@ func (c *Crawler) CrawlBarsWithKey(ticker, apiKey string, from, to time.Time) ([
 		}
 	}
 	return allBars, nil
+}
+
+// SaveBars persists bars into dir/ticker/ using the configured PacketSaver.
+// dir is the asset-class-specific directory (e.g. data/Polygon/stocks).
+// If dir is empty or PacketSaver is nil, the call is a no-op.
+//
+// File name format: {ticker}_{timespan}_{from}.{ext}  (per-day)
+//
+//	{ticker}_{timespan}_{from}_to_{to}.{ext}  (range)
+func (c *Crawler) SaveBars(dir, ticker string, from, to time.Time, bars []model.Bar) {
+	if dir == "" || c.PacketSaver == nil || len(bars) == 0 {
+		return
+	}
+	tickerDir := filepath.Join(dir, ticker)
+	if err := os.MkdirAll(tickerDir, 0755); err != nil {
+		slog.Error("save: mkdir failed", "ticker", ticker, "dir", tickerDir, "err", err)
+		return
+	}
+	ext := c.PacketSaver.Extension()
+	ts := c.timespanLabel()
+	var name string
+	if c.SavePerDay {
+		name = fmt.Sprintf("%s_%s_%s.%s", ticker, ts, from.Format("2006-01-02"), ext)
+	} else {
+		name = fmt.Sprintf("%s_%s_%s_to_%s.%s", ticker, ts, from.Format("2006-01-02"), to.Format("2006-01-02"), ext)
+	}
+	packetPath := filepath.Join(tickerDir, name)
+	if err := c.PacketSaver.Save(bars, packetPath); err != nil {
+		slog.Error("save: write failed", "ticker", ticker, "path", packetPath, "err", err)
+	} else {
+		slog.Info("save ok", "ticker", ticker, "format", ext, "path", packetPath, "bars", len(bars))
+	}
 }

@@ -1,6 +1,7 @@
 package polygon
 
 import (
+	"hist-data/internal/saver"
 	"net/http"
 	"time"
 )
@@ -25,9 +26,12 @@ func newHTTPClient() *http.Client {
 	}
 }
 
-// NewCrawler constructs a Crawler with a shared HTTP client.
-func NewCrawler() (*Crawler, error) {
+func NewCrawler(saveDir, timespan string, multiplier int, ps saver.PacketSaver) (*Crawler, error) {
 	return &Crawler{
-		client: newHTTPClient(),
+		client:        newHTTPClient(),
+		SavePacketDir: saveDir,
+		PacketSaver:   ps,
+		Timespan:      timespan,
+		Multiplier:    multiplier,
 	}, nil
 }
