@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
 )
 
@@ -24,15 +26,26 @@ type AssetConfig struct {
 	Tickers  []string `mapstructure:"tickers"`  // explicit individual symbols
 	Validate bool     `mapstructure:"validate"` // verify tickers against reference API (Polygon only)
 
-	// Per-asset interval — overrides the provider-level default when set.
-	Timespan   string `mapstructure:"timespan"`   // massive: minute|hour|day|week|month
-	Multiplier int    `mapstructure:"multiplier"` // massive: e.g. 1, 5, 15
-	Interval   string `mapstructure:"interval"`   // binance: 1m|5m|1h|1d|...
-	TimeFrame  string `mapstructure:"timeFrame"`  // vci: ONE_DAY|ONE_MINUTE|ONE_HOUR
+	// Frames is the preferred timeframe model across all providers.
+	// Examples: M1, M5, M15, M30, H1, H4, D1.
+	// Set sinkFrames per frame to derive additional timeframes from the fetched source.
+	// Example: M1 with sinkFrames [M1, M5, M15, M30, H1, H4] saves all derived bars.
+	Frames []FrameSpec `mapstructure:"frames"`
 
-	// BackfillYears overrides the provider-level backfillYears for this asset only.
-	// 0 means use the provider default.
+	// Legacy per-provider frame fields kept for backward compatibility.
+	Timespans  []string `mapstructure:"timespan"`   // massive: minute|hour|day|week|month
+	Multiplier int      `mapstructure:"multiplier"` // massive: e.g. 1, 5, 15
+	Intervals  []string `mapstructure:"interval"`   // binance: 1m|5m|1h|1d|...
+	TimeFrames []string `mapstructure:"timeFrame"`  // vci: ONE_DAY|ONE_MINUTE|ONE_HOUR
+
+	// BackfillYears applies to this data pipeline when a frame does not override it.
 	BackfillYears int `mapstructure:"backfillYears"`
+}
+
+type FrameSpec struct {
+	Name          string   `mapstructure:"name"`
+	BackfillYears int      `mapstructure:"backfillYears"`
+	SinkFrames    []string `mapstructure:"sinkFrames"`
 }
 
 // Config is the application configuration loaded from config.yaml with env overrides.
@@ -41,29 +54,27 @@ type Config struct {
 
 	// Massive / Polygon — US stocks and indices (requires API key)
 	Massive struct {
-		BaseURL       string   `mapstructure:"baseUrl"`       // default: https://api.polygon.io
-		Keys          []string `mapstructure:"keys"`          // set via POLYGON_API_KEYS env
-		Workers       int      `mapstructure:"workers"`       // parallel goroutines; 0 = one per key (default)
-		BackfillYears int      `mapstructure:"backfillYears"` // years of history on first run
-		RateLimitSec  int      `mapstructure:"rateLimit"`     // seconds between requests per worker; 0 = no limit
-		Schedule      struct {
+		BaseURL      string   `mapstructure:"baseUrl"`   // default: https://api.polygon.io
+		Keys         []string `mapstructure:"keys"`      // set via POLYGON_API_KEYS env
+		Workers      int      `mapstructure:"workers"`   // parallel goroutines; 0 = one per key (default)
+		RateLimitSec int      `mapstructure:"rateLimit"` // seconds between requests per worker; 0 = no limit
+		Schedule     struct {
 			RunHour   int `mapstructure:"runHour"`
 			RunMinute int `mapstructure:"runMinute"`
 		} `mapstructure:"schedule"`
 	} `mapstructure:"massive"`
 
 	Data struct {
-		Dir    string `mapstructure:"dir"`    // root output directory
+		Dir    string `mapstructure:"dir"`    // root output directory; supports relative (../data) and absolute paths
 		Format string `mapstructure:"format"` // parquet | csv | json
 	} `mapstructure:"data"`
 
 	// Binance — crypto klines (public API, no key required)
 	Binance struct {
-		BaseURL       string `mapstructure:"baseUrl"`       // default: https://api.binance.com
-		Workers       int    `mapstructure:"workers"`       // parallel download goroutines
-		BackfillYears int    `mapstructure:"backfillYears"` // years of history on first run
-		RateLimitSec  int    `mapstructure:"rateLimit"`     // seconds between requests per worker; 0 = no limit
-		Schedule      struct {
+		BaseURL      string `mapstructure:"baseUrl"`   // default: https://api.binance.com
+		Workers      int    `mapstructure:"workers"`   // parallel download goroutines
+		RateLimitSec int    `mapstructure:"rateLimit"` // seconds between requests per worker; 0 = no limit
+		Schedule     struct {
 			RunHour   int `mapstructure:"runHour"`
 			RunMinute int `mapstructure:"runMinute"`
 		} `mapstructure:"schedule"`
@@ -72,12 +83,11 @@ type Config struct {
 	// TwelveData — forex, stocks, ETFs, indices, crypto (requires API key)
 	// Free tier: 8 req/min, 800 credits/day. Set workers: 1 on free plan.
 	TwelveData struct {
-		BaseURL       string `mapstructure:"baseUrl"`       // default: https://api.twelvedata.com
-		APIKey        string `mapstructure:"apiKey"`        // set via TWELVEDATA_API_KEY env
-		Workers       int    `mapstructure:"workers"`       // 1 on free tier, up to 8 on paid
-		BackfillYears int    `mapstructure:"backfillYears"` // years of history on first run
-		RateLimitSec  int    `mapstructure:"rateLimit"`     // seconds between requests per worker; 0 = no limit
-		Schedule      struct {
+		BaseURL      string `mapstructure:"baseUrl"`   // default: https://api.twelvedata.com
+		APIKey       string `mapstructure:"apiKey"`    // set via TWELVEDATA_API_KEY env
+		Workers      int    `mapstructure:"workers"`   // 1 on free tier, up to 8 on paid
+		RateLimitSec int    `mapstructure:"rateLimit"` // seconds between requests per worker; 0 = no limit
+		Schedule     struct {
 			RunHour   int `mapstructure:"runHour"`
 			RunMinute int `mapstructure:"runMinute"`
 		} `mapstructure:"schedule"`
@@ -85,11 +95,10 @@ type Config struct {
 
 	// VCI (Vietcap) — Vietnamese stocks (no key required)
 	VCI struct {
-		BaseURL       string `mapstructure:"baseUrl"`       // default: https://trading.vietcap.com.vn/api
-		Workers       int    `mapstructure:"workers"`       // parallel goroutines
-		BackfillYears int    `mapstructure:"backfillYears"` // years of history on first run
-		RateLimitSec  int    `mapstructure:"rateLimit"`     // seconds between requests per worker; 0 = no limit
-		Schedule      struct {
+		BaseURL      string `mapstructure:"baseUrl"`   // default: https://trading.vietcap.com.vn/api
+		Workers      int    `mapstructure:"workers"`   // parallel goroutines
+		RateLimitSec int    `mapstructure:"rateLimit"` // seconds between requests per worker; 0 = no limit
+		Schedule     struct {
 			RunHour   int `mapstructure:"runHour"`
 			RunMinute int `mapstructure:"runMinute"`
 		} `mapstructure:"schedule"`
@@ -156,7 +165,7 @@ func LoadConfig() (*Config, error) {
 	slog.Info("loaded config", "file", v.ConfigFileUsed())
 
 	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
+	if err := v.Unmarshal(&cfg, viper.DecodeHook(stringOrSliceHook())); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
@@ -166,12 +175,16 @@ func LoadConfig() (*Config, error) {
 	return &cfg, nil
 }
 
-var validTimespans = map[string]bool{
-	"minute": true, "hour": true, "day": true, "week": true, "month": true,
-}
-
-var validVCITimeFrames = map[string]bool{
-	"ONE_DAY": true, "ONE_MINUTE": true, "ONE_HOUR": true,
+var supportedFrameNames = map[string]bool{
+	"M1":  true,
+	"M5":  true,
+	"M15": true,
+	"M30": true,
+	"H1":  true,
+	"H4":  true,
+	"D1":  true,
+	"W1":  true,
+	"MO1": true,
 }
 
 func validateConfig(cfg *Config) error {
@@ -195,15 +208,33 @@ func validateConfig(cfg *Config) error {
 			if len(cfg.Massive.Keys) == 0 {
 				return fmt.Errorf("asset %q uses massive provider but no API keys found: set POLYGON_API_KEYS env", a.Class)
 			}
-			if a.Timespan != "" && !validTimespans[strings.ToLower(a.Timespan)] {
-				return fmt.Errorf("asset %q: unsupported timespan %q (allowed: minute, hour, day, week, month)", a.Class, a.Timespan)
-			}
 			if a.Multiplier < 0 {
 				return fmt.Errorf("asset %q: multiplier must be >= 1, got %d", a.Class, a.Multiplier)
 			}
-		case "vci":
-			if a.TimeFrame != "" && !validVCITimeFrames[a.TimeFrame] {
-				return fmt.Errorf("asset %q: unsupported timeFrame %q (allowed: ONE_DAY, ONE_MINUTE, ONE_HOUR)", a.Class, a.TimeFrame)
+		}
+
+		frames := a.frameSpecs()
+		if len(frames) == 0 {
+			return fmt.Errorf("asset %q: no frames configured", a.Class)
+		}
+		for _, frame := range frames {
+			if frame.Name == "" {
+				return fmt.Errorf("asset %q: frame name must not be empty", a.Class)
+			}
+			if !supportedFrameNames[frame.Name] {
+				return fmt.Errorf("asset %q: unsupported frame %q (allowed: M1, M5, M15, M30, H1, H4, D1, W1, MO1)", a.Class, frame.Name)
+			}
+			if frame.BackfillYears <= 0 {
+				return fmt.Errorf("asset %q frame %q: backfillYears must be > 0", a.Class, frame.Name)
+			}
+			if _, err := providerFrameSpec(prov, frame.Name); err != nil {
+				return fmt.Errorf("asset %q: %w", a.Class, err)
+			}
+		}
+
+		for _, asset := range a.expand() {
+			if err := validateSinkFrames(asset); err != nil {
+				return fmt.Errorf("asset %q source %q: %w", a.Class, asset.Frame.Name, err)
 			}
 		}
 	}
@@ -231,13 +262,253 @@ func parseAPIKeysFromEnv() []string {
 	return keys
 }
 
-// SaveBaseDir returns the root output directory for a given provider.
-// e.g. data/Binance, data/TwelveData, data/Polygon
-func (c *Config) SaveBaseDir() string {
-	return filepath.Join(c.Data.Dir, "Polygon")
+func stringOrSliceHook() mapstructure.DecodeHookFunc {
+	return func(from reflect.Type, to reflect.Type, data any) (any, error) {
+		if to != reflect.TypeOf([]string{}) {
+			return data, nil
+		}
+
+		switch from.Kind() {
+		case reflect.String:
+			value := strings.TrimSpace(data.(string))
+			if value == "" {
+				return []string{}, nil
+			}
+			return []string{value}, nil
+		case reflect.Slice:
+			if from.Elem().Kind() == reflect.String {
+				return data, nil
+			}
+
+			items, ok := data.([]any)
+			if !ok {
+				return data, nil
+			}
+
+			out := make([]string, 0, len(items))
+			for _, item := range items {
+				value, ok := item.(string)
+				if !ok {
+					return data, nil
+				}
+				value = strings.TrimSpace(value)
+				if value != "" {
+					out = append(out, value)
+				}
+			}
+			return out, nil
+		default:
+			return data, nil
+		}
+	}
 }
 
-// ProviderSaveDir returns the provider-specific output directory.
+type resolvedAsset struct {
+	AssetConfig
+	Frame      FrameSpec
+	SinkFrames []string
+}
+
+func (a AssetConfig) expand() []resolvedAsset {
+	frames := a.frameSpecs()
+	if len(frames) == 0 {
+		frames = []FrameSpec{{}}
+	}
+
+	out := make([]resolvedAsset, 0, len(frames))
+	for _, frame := range frames {
+		normalized := normalizeFrameSpec(frame, a.BackfillYears)
+		out = append(out, resolvedAsset{
+			AssetConfig: a,
+			Frame:       normalized,
+			SinkFrames:  normalizeSinkFrames(normalized.SinkFrames, normalized.Name),
+		})
+	}
+	return out
+}
+
+// normalizeSinkFrames deduplicates sink frame names.
+// If sinks is empty, defaults to [sourceFrame] (save only the fetched frame).
+func normalizeSinkFrames(sinks []string, sourceFrame string) []string {
+	sourceFrame = strings.ToUpper(strings.TrimSpace(sourceFrame))
+	if len(sinks) == 0 {
+		return []string{sourceFrame}
+	}
+
+	out := make([]string, 0, len(sinks))
+	seen := make(map[string]struct{}, len(sinks))
+	for _, sink := range sinks {
+		sink = strings.ToUpper(strings.TrimSpace(sink))
+		if sink == "" {
+			continue
+		}
+		if _, ok := seen[sink]; ok {
+			continue
+		}
+		seen[sink] = struct{}{}
+		out = append(out, sink)
+	}
+	return out
+}
+
+func (a AssetConfig) frameSpecs() []FrameSpec {
+	if len(a.Frames) > 0 {
+		out := make([]FrameSpec, 0, len(a.Frames))
+		for _, frame := range a.Frames {
+			out = append(out, normalizeFrameSpec(frame, a.BackfillYears))
+		}
+		return out
+	}
+
+	return a.legacyFrameSpecs()
+}
+
+func (a AssetConfig) legacyFrameSpecs() []FrameSpec {
+	provider := ProviderName(a)
+	switch provider {
+	case "massive":
+		if len(a.Timespans) == 0 {
+			return nil
+		}
+		out := make([]FrameSpec, 0, len(a.Timespans))
+		for _, timespan := range a.Timespans {
+			out = append(out, FrameSpec{
+				Name:          legacyMassiveFrameName(strings.TrimSpace(timespan), a.Multiplier),
+				BackfillYears: a.BackfillYears,
+			})
+		}
+		return out
+	case "vci":
+		if len(a.TimeFrames) == 0 {
+			return nil
+		}
+		out := make([]FrameSpec, 0, len(a.TimeFrames))
+		for _, timeFrame := range a.TimeFrames {
+			out = append(out, FrameSpec{
+				Name:          legacyVCIFrameName(strings.TrimSpace(timeFrame)),
+				BackfillYears: a.BackfillYears,
+			})
+		}
+		return out
+	default:
+		if len(a.Intervals) == 0 {
+			return nil
+		}
+		out := make([]FrameSpec, 0, len(a.Intervals))
+		for _, interval := range a.Intervals {
+			out = append(out, FrameSpec{
+				Name:          legacyIntervalFrameName(strings.TrimSpace(interval)),
+				BackfillYears: a.BackfillYears,
+			})
+		}
+		return out
+	}
+}
+
+func normalizeFrameSpec(frame FrameSpec, defaultBackfill int) FrameSpec {
+	frame.Name = strings.ToUpper(strings.TrimSpace(frame.Name))
+	if frame.BackfillYears <= 0 {
+		frame.BackfillYears = defaultBackfill
+	}
+	// Normalize sink frame names in-place (uppercase, trim).
+	for i, s := range frame.SinkFrames {
+		frame.SinkFrames[i] = strings.ToUpper(strings.TrimSpace(s))
+	}
+	return frame
+}
+
+func validateSinkFrames(asset resolvedAsset) error {
+	source := asset.Frame.Name
+	if source == "" {
+		return fmt.Errorf("source frame is required")
+	}
+	if len(asset.SinkFrames) == 0 {
+		return fmt.Errorf("at least one sink frame is required")
+	}
+
+	// Only M1 source supports deriving other frames.
+	// Non-M1 frames must sink only to themselves.
+	if source != "M1" {
+		for _, sink := range asset.SinkFrames {
+			if sink != source {
+				return fmt.Errorf("source frame %q cannot derive sink %q: only M1 supports frame derivation", source, sink)
+			}
+		}
+		return nil
+	}
+
+	allowed := map[string]bool{
+		"M1": true, "M5": true, "M15": true,
+		"M30": true, "H1": true, "H4": true,
+	}
+	for _, sink := range asset.SinkFrames {
+		if !allowed[sink] {
+			return fmt.Errorf("sink frame %q not supported for M1 source (allowed: M1, M5, M15, M30, H1, H4)", sink)
+		}
+	}
+	return nil
+}
+
+func legacyMassiveFrameName(timespan string, multiplier int) string {
+	if multiplier <= 0 {
+		multiplier = 1
+	}
+	switch strings.ToLower(timespan) {
+	case "minute":
+		return fmt.Sprintf("M%d", multiplier)
+	case "hour":
+		return fmt.Sprintf("H%d", multiplier)
+	case "day":
+		return fmt.Sprintf("D%d", multiplier)
+	case "week":
+		return fmt.Sprintf("W%d", multiplier)
+	case "month":
+		return fmt.Sprintf("MO%d", multiplier)
+	default:
+		return ""
+	}
+}
+
+func legacyIntervalFrameName(interval string) string {
+	switch strings.ToLower(interval) {
+	case "1m":
+		return "M1"
+	case "5m":
+		return "M5"
+	case "15m":
+		return "M15"
+	case "30m":
+		return "M30"
+	case "1h":
+		return "H1"
+	case "4h":
+		return "H4"
+	case "1d", "1day":
+		return "D1"
+	case "1w", "1week":
+		return "W1"
+	case "1month", "1mo", "1mth", "1M":
+		return "MO1"
+	default:
+		return ""
+	}
+}
+
+func legacyVCIFrameName(timeFrame string) string {
+	switch strings.ToUpper(timeFrame) {
+	case "ONE_MINUTE":
+		return "M1"
+	case "ONE_HOUR":
+		return "H1"
+	case "ONE_DAY":
+		return "D1"
+	default:
+		return ""
+	}
+}
+
+// ProviderSaveDir returns the output directory for a given provider
+// rooted at data.dir. Supports relative (../data) and absolute paths.
 func (c *Config) ProviderSaveDir(provider string) string {
 	switch provider {
 	case "binance":
@@ -323,6 +594,15 @@ func (c *Config) EnabledAssets() []AssetConfig {
 		if a.Enabled {
 			out = append(out, a)
 		}
+	}
+	return out
+}
+
+// ExpandedAssets flattens multi-frame asset config into one runtime asset per frame.
+func (c *Config) ExpandedAssets() []resolvedAsset {
+	var out []resolvedAsset
+	for _, asset := range c.EnabledAssets() {
+		out = append(out, asset.expand()...)
 	}
 	return out
 }

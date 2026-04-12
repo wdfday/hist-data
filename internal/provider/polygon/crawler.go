@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -64,6 +62,8 @@ type Crawler struct {
 	SavePerDay    bool              // When true, saves one file per day; otherwise a single range file.
 	Timespan      string            // minute | hour | day | week | month (default: minute)
 	Multiplier    int               // timeframe multiplier, e.g. 1, 5, 15 (default: 1)
+	FrameLabel    string
+	SinkFrames    []string
 }
 
 func (c *Crawler) timespan() string {
@@ -365,33 +365,37 @@ func (c *Crawler) FetchBars(ticker, apiKey string, from, to time.Time) ([]model.
 }
 
 // SaveBars persists bars into dir/ticker/ using the configured PacketSaver.
-// dir is the asset-class-specific directory (e.g. data/Polygon/stocks).
-// If dir is empty or PacketSaver is nil, the call is a no-op.
-//
-// File name format: {ticker}_{timespan}_{from}.{ext}  (per-day)
-//
-//	{ticker}_{timespan}_{from}_to_{to}.{ext}  (range)
+// Filters to regular NYSE/NASDAQ session (9:30–16:00 ET) before saving.
 func (c *Crawler) SaveBars(dir, ticker string, from, to time.Time, bars []model.Bar) {
-	if dir == "" || c.PacketSaver == nil || len(bars) == 0 {
-		return
+	bars = filterRegularHours(bars)
+	frameLabel := c.FrameLabel
+	if frameLabel == "" {
+		frameLabel = strings.ToUpper(c.timespanLabel())
 	}
-	tickerDir := filepath.Join(dir, ticker)
-	if err := os.MkdirAll(tickerDir, 0755); err != nil {
-		slog.Error("save: mkdir failed", "ticker", ticker, "dir", tickerDir, "err", err)
-		return
+	saver.SaveFrameSet("polygon", frameLabel, c.SinkFrames, dir, ticker, from, to, bars, c.PacketSaver)
+}
+
+var etLocation = func() *time.Location {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		panic("time: cannot load America/New_York: " + err.Error())
 	}
-	ext := c.PacketSaver.Extension()
-	ts := c.timespanLabel()
-	var name string
-	if c.SavePerDay {
-		name = fmt.Sprintf("%s_%s_%s.%s", ticker, ts, from.Format("2006-01-02"), ext)
-	} else {
-		name = fmt.Sprintf("%s_%s_%s_to_%s.%s", ticker, ts, from.Format("2006-01-02"), to.Format("2006-01-02"), ext)
+	return loc
+}()
+
+// filterRegularHours keeps only bars within NYSE/NASDAQ regular session:
+// 9:30–16:00 ET (handles EST/EDT automatically).
+func filterRegularHours(bars []model.Bar) []model.Bar {
+	const openMin = 9*60 + 30 // 09:30
+	const closeMin = 16 * 60  // 16:00
+
+	out := bars[:0]
+	for _, bar := range bars {
+		ts := time.UnixMilli(bar.Timestamp).In(etLocation)
+		mins := ts.Hour()*60 + ts.Minute()
+		if mins >= openMin && mins < closeMin {
+			out = append(out, bar)
+		}
 	}
-	packetPath := filepath.Join(tickerDir, name)
-	if err := c.PacketSaver.Save(bars, packetPath); err != nil {
-		slog.Error("save: write failed", "ticker", ticker, "path", packetPath, "err", err)
-	} else {
-		slog.Info("save ok", "ticker", ticker, "format", ext, "path", packetPath, "bars", len(bars))
-	}
+	return out
 }

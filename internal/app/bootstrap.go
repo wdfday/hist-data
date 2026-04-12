@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"hist-data/internal/crawl"
 	"hist-data/internal/provider/polygon"
 	"hist-data/internal/provider/vci"
 )
 
-// ResolveTargetsByProvider resolves tickers for all enabled assets and returns
+// ResolveTargetsByProvider resolves tickers for all expanded assets and returns
 // jobs grouped by provider name. Each provider key maps to a slice of Jobs
 // that its BarFetcher should handle.
 func ResolveTargetsByProvider(cfg *Config) (map[string][]crawl.Job, error) {
@@ -21,10 +22,10 @@ func ResolveTargetsByProvider(cfg *Config) (map[string][]crawl.Job, error) {
 
 	result := make(map[string][]crawl.Job)
 
-	for _, asset := range cfg.EnabledAssets() {
-		key := AssetKey(asset)   // "provider:class"
-		prov := ProviderName(asset)
-		saveDir := cfg.ProviderSaveDir(prov)
+	for _, asset := range cfg.ExpandedAssets() {
+		key := AssetKey(asset)
+		prov := ProviderName(asset.AssetConfig)
+		saveDir := filepath.Join(cfg.ProviderSaveDir(prov), asset.Frame.Name)
 		class := crawl.AssetClass(asset.Class)
 
 		var tickers []string
@@ -103,4 +104,3 @@ func resolveVCITickers(baseURL string, groups, explicitTickers []string) ([]stri
 	}
 	return out, nil
 }
-

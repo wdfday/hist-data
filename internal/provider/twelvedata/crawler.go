@@ -2,9 +2,7 @@ package twelvedata
 
 import (
 	"fmt"
-	"log/slog"
-	"os"
-	"path/filepath"
+	"strings"
 	"time"
 
 	"hist-data/internal/model"
@@ -19,6 +17,8 @@ type Crawler struct {
 	Interval      string // TwelveData interval: "1min", "1day", etc.
 	SavePacketDir string
 	PacketSaver   saver.PacketSaver
+	FrameLabel    string
+	SinkFrames    []string
 }
 
 // NewCrawler creates a TwelveData Crawler.
@@ -71,22 +71,9 @@ func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, 
 
 // SaveBars persists bars to {dir}/{symbol}/ using the configured saver.
 func (c *Crawler) SaveBars(dir, symbol string, from, to time.Time, bars []model.Bar) {
-	if dir == "" || c.PacketSaver == nil || len(bars) == 0 {
-		return
+	frameLabel := c.FrameLabel
+	if frameLabel == "" {
+		frameLabel = strings.ToUpper(c.Interval)
 	}
-	tickerDir := filepath.Join(dir, symbol)
-	if err := os.MkdirAll(tickerDir, 0o755); err != nil {
-		slog.Error("twelvedata save: mkdir failed", "symbol", symbol, "dir", tickerDir, "err", err)
-		return
-	}
-	ext := c.PacketSaver.Extension()
-	name := fmt.Sprintf("%s_%s_%s_to_%s.%s",
-		symbol, c.Interval,
-		from.Format("2006-01-02"), to.Format("2006-01-02"), ext)
-	path := filepath.Join(tickerDir, name)
-	if err := c.PacketSaver.Save(bars, path); err != nil {
-		slog.Error("twelvedata save: write failed", "symbol", symbol, "path", path, "err", err)
-	} else {
-		slog.Info("twelvedata save ok", "symbol", symbol, "bars", len(bars), "path", path)
-	}
+	saver.SaveFrameSet("twelvedata", frameLabel, c.SinkFrames, dir, symbol, from, to, bars, c.PacketSaver)
 }

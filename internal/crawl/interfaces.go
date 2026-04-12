@@ -15,6 +15,6 @@ type BarFetcher interface {
 	FetchBars(ticker, apiKey string, from, to time.Time) ([]model.Bar, error)
 
 	// SaveBars persists bars to dir/ticker/ using the configured storage format.
-	// dir is the asset-class-specific directory (e.g. data/Polygon/stocks).
+	// dir is the frame-specific directory (e.g. data/Polygon/M1).
 	SaveBars(dir, ticker string, from, to time.Time, bars []model.Bar)
 }

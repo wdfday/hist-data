@@ -1,29 +1,20 @@
 package crawl
 
 import (
-	"path/filepath"
 	"sort"
 	"time"
 )
 
-// ClassSaveDir returns the per-class subdirectory under saveBaseDir.
-//
-//	ClassSaveDir("data/Polygon", AssetStocks) → "data/Polygon/stocks"
-func ClassSaveDir(saveBaseDir string, class AssetClass) string {
-	return filepath.Join(saveBaseDir, string(class))
-}
-
 // BuildTargets stamps a flat ticker list into typed Job targets,
 // filling Source, Class, and SaveDir for each entry.
-func BuildTargets(tickers []string, saveBaseDir, source string, class AssetClass) []Job {
-	dir := ClassSaveDir(saveBaseDir, class)
+func BuildTargets(tickers []string, saveDir, source string, class AssetClass) []Job {
 	out := make([]Job, 0, len(tickers))
 	for _, t := range tickers {
 		out = append(out, Job{
 			Source:  source,
 			Class:   class,
 			Ticker:  t,
-			SaveDir: dir,
+			SaveDir: saveDir,
 		})
 	}
 	return out

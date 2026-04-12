@@ -73,7 +73,7 @@ flowchart TD
         SAVER["PacketSaver\nParquet · CSV · JSON"]
     end
 
-    OUT["data/\n├── Polygon/stocks/AAPL/\n├── Binance/crypto/BTCUSDT/\n├── TwelveData/forex/EURUSD/\n└── VCI/stocks/VNM/"]
+    OUT["data/\n├── Polygon/M1/AAPL/\n├── Binance/M1/BTCUSDT/\n├── TwelveData/M1/EURUSD/\n└── VCI/D1/VNM/"]
     BT["Backtesting Engine\n(Rust / polars)"]
 
     CFG --> POL & BIN & TD & VCI
@@ -156,48 +156,97 @@ All settings in `config.yaml`. Secrets via env — never commit API keys.
 # ── Massive/Polygon (API key required) ───────────────────────────────────
 massive:
   workers: 3
-  backfillYears: 2
   schedule:
     runHour: 18      # UTC hour to trigger daily run
     runMinute: 0
 
 # ── Binance (no key, crypto) ──────────────────────────────────────────────
 binance:
-  interval: "5m"      # 1m | 5m | 15m | 1h | 4h | 1d
   workers: 3
 
 # ── TwelveData (API key required) ────────────────────────────────────────
 twelvedata:
-  interval: "5min"    # 1min | 5min | 15min | 1h | 1day
   workers: 2
 
 # ── VCI / Vietcap (no key, Vietnamese stocks) ────────────────────────────
 vci:
-  timeFrame: "ONE_MINUTE"    # ONE_MINUTE | ONE_HOUR | ONE_DAY
   workers: 2
 
 # ── Assets ───────────────────────────────────────────────────────────────
 assets:
   - class: stocks
     provider: massive
+    backfillYears: 2
+    frames:
+      - name: M1
+    sinkFrames: [M1, M5, M15, M30, H1, H4]
     enabled: true
     groups: [sp500, nasdaq100]
 
   - class: crypto
     provider: binance
+    backfillYears: 4
+    frames:
+      - name: M1
+      - name: D1
+        backfillYears: 7
+    sinkFrames: [M1, M5, M15, M30, H1, H4]
     enabled: true
     tickers: [BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT]
 
   - class: forex
     provider: twelvedata
+    backfillYears: 10
+    frames:
+      - name: M1
+    sinkFrames: [M1, M5, M15, M30, H1, H4]
     enabled: true
     tickers: [EUR/USD, GBP/USD, USD/JPY]
 
-  - class: stocks
+  - class: vn
     provider: vci
+    backfillYears: 3
+    frames:
+      - name: M1
+      - name: D1
+        backfillYears: 25
+    sinkFrames: [M1, M5, M15, M30, H1, H4]
     enabled: true
-    groups: [vn30, hose]
+    groups: [vn30]
 ```
+
+### Frame model
+
+Use `frames` on each asset entry. Every frame expands into a separate runtime pipeline key:
+
+```yaml
+frames:
+  - name: M1
+    backfillYears: 3
+  - name: D1
+    backfillYears: 25
+```
+
+`backfillYears` is required at the data type level. Each frame may override it when needed.
+
+If source frame is `M1`, you can optionally add `sinkFrames` so the writer saves derived intraday bars in one pass:
+
+```yaml
+sinkFrames: [M1, M5, M15, M30, H1, H4]
+```
+
+Supported frame names: `M1`, `M5`, `M15`, `M30`, `H1`, `H4`, `D1`, `W1`, `MO1`.
+
+### Provider frame support
+
+| Provider | Supported frames |
+| -------- | ---------------- |
+| `massive` | `M1`, `M5`, `M15`, `M30`, `H1`, `H4`, `D1`, `W1`, `MO1` |
+| `binance` | `M1`, `M5`, `M15`, `M30`, `H1`, `H4`, `D1`, `W1`, `MO1` |
+| `twelvedata` | `M1`, `M5`, `M15`, `M30`, `H1`, `H4`, `D1`, `W1`, `MO1` |
+| `vci` | `M1`, `H1`, `D1` |
+
+Legacy fields `timespan`, `interval`, and `timeFrame` are still accepted during migration, but new config should use `frames`.
 
 ### Polygon asset groups
 
@@ -217,7 +266,8 @@ assets:
 | `hose`  | All HOSE-listed stocks         |
 | `hnx`   | All HNX-listed stocks          |
 
-> VCI native timeframes: `ONE_MINUTE`, `ONE_HOUR`, `ONE_DAY`. Minute data depth: ~2.5 years.
+> VCI native timeframes map from unified frames: `M1` → `ONE_MINUTE`, `H1` → `ONE_HOUR`, `D1` → `ONE_DAY`.
+> Minute data depth is roughly 2.5 years.
 
 ---
 
@@ -226,18 +276,18 @@ assets:
 ```
 data/
 ├── Polygon/
-│   └── stocks/AAPL/
+│   └── M1/AAPL/
 │       └── AAPL_5min_2024-01-01_to_2026-01-01.parquet
 ├── Binance/
-│   └── crypto/BTCUSDT/
+│   └── M1/BTCUSDT/
 │       └── BTCUSDT_5m_2024-01-01_to_2026-01-01.parquet
 ├── TwelveData/
-│   └── forex/EURUSD/
+│   └── M1/EURUSD/
 │       └── EURUSD_5min_2024-01-01_to_2026-01-01.parquet
 ├── VCI/
-│   └── stocks/VNM/
+│   └── D1/VNM/
 │       └── VNM_1min_2024-01-01_to_2026-01-01.parquet
-├── .lastday.json          # progress: provider:class:TICKER → last fetched date
+├── .lastday.json          # progress: provider:class:frame:TICKER → last fetched date
 ├── .lastrun.success.json
 └── .lastrun.failed.json
 ```

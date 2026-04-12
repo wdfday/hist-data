@@ -7,7 +7,6 @@ massive:
   baseUrl: "https://api.polygon.io"
   keys: []              # set via POLYGON_API_KEYS env — never commit keys
   workers: 0            # 0 = one goroutine per key (default); set higher on pro plan (e.g. 1 key × 5 workers)
-  backfillYears: 2      # Polygon has 10+ years; 2y covers 1 full market cycle
   rateLimit: 12         # seconds between requests per worker; free tier = 5 req/min → 12s cooldown
   schedule:
     runHour: 4          # UTC — 04:00 UTC = 11:00 Vietnam (UTC+7)
@@ -20,7 +19,6 @@ binance:
   # Rate limit: ~1200 weight/min per IP; each klines call = 2 weight.
   # workers=3 → ~100 req/min → safe headroom. Do NOT set > 10.
   workers: 3
-  backfillYears: 4      # crypto: 4y covers 2 halving cycles (2020, 2024)
   rateLimit: 0          # no per-request delay needed; weight budget handles it
   schedule:
     runHour: 0          # UTC midnight — crypto trades 24/7, run at day rollover
@@ -35,7 +33,6 @@ binance:
 twelvedata:
   baseUrl: "https://api.twelvedata.com"
   workers: 1            # free tier: 8 req/min max; 1 worker is safest
-  backfillYears: 10     # TwelveData has forex history back to ~2010
   rateLimit: 8          # seconds between requests; free tier = 8 req/min → ~7.5s, use 8 to be safe
   schedule:
     runHour: 1          # UTC — forex market closes Friday 5 PM ET
@@ -46,7 +43,6 @@ twelvedata:
 vci:
   baseUrl: "https://trading.vietcap.com.vn/api"
   workers: 1            # 1 worker to avoid 429; VCI rate-limits aggressively
-  backfillYears: 3      # VCI: ~2.5y available for minute data
   rateLimit: 3          # 1s between tickers; each ticker already makes ~10 HTTP calls (30k bars/req)
   schedule:
     runHour: 9          # UTC — 09:00 UTC = 16:00 Vietnam; HOSE closes 15:00 local
@@ -62,21 +58,25 @@ schedule:
 
 # ── Global data settings ───────────────────────────────────────────────────
 data:
-  dir: data             # root output directory; override via DATA_DIR env
+  dir: data             # root output directory; relative or absolute (e.g. ../data, /mnt/storage/hist); override via DATA_DIR env
   format: parquet       # parquet | csv | json; override via SAVE_FORMAT env
 
 
 # ── Asset pipelines ────────────────────────────────────────────────────────
-# Each entry = one independent crawl pipeline (one worker pool).
-# key: "provider:class"  (e.g. "massive:stocks", "binance:crypto", "vci:vn")
-# backfillYears: optional — overrides provider-level default for this asset only.
+# Each entry = one independent crawl pipeline definition.
+# `backfillYears` must be declared at the data type level or overridden per frame.
+# Each frame expands into its own runtime pipeline key: "provider:class:frame".
+# `sinkFrames` on a frame derives additional timeframes from M1 source data.
+# Legacy fields (`timespan`, `interval`, `timeFrame`) still work during migration.
 assets:
 
   # ── US Stocks via Polygon ─────────────────────────────────────────────────
   - class: stocks
     provider: massive
-    timespan: minute
-    multiplier: 1       # 1 × minute = 1-min bars (M1)
+    backfillYears: 2    # Polygon has 10+ years; 2y covers 1 full market cycle
+    frames:
+      - name: M1
+        sinkFrames: [M1, M5, M15, M30, H1, H4]
     enabled: true
     groups:
       - sp500           # ~503 stocks, free (GitHub CSV)
@@ -87,8 +87,10 @@ assets:
   # ── US Indices via Polygon (Starter+ plan required) ───────────────────────
   - class: indices
     provider: massive
-    timespan: minute
-    multiplier: 1
+    backfillYears: 2
+    frames:
+      - name: M1
+        sinkFrames: [M1, M5, M15, M30, H1, H4]
     enabled: false
     groups: []
     tickers:
@@ -96,10 +98,15 @@ assets:
       - I:NDX           # NASDAQ-100
     validate: false
 
-  # ── Crypto via Binance — 1-minute bars ───────────────────────────────────
+  # ── Crypto via Binance — multiple frames ─────────────────────────────────
   - class: crypto
     provider: binance
-    interval: "1m"      # aggregate to M5/M15/H1 at runtime
+    backfillYears: 4    # crypto: 4y covers 2 halving cycles (2020, 2024)
+    frames:
+      - name: M1
+        sinkFrames: [M1, M5, M15, M30, H1, H4]
+      - name: D1
+        backfillYears: 7
     enabled: true
     groups: []
     tickers:
@@ -115,32 +122,14 @@ assets:
       - MATICUSDT
     validate: false
 
-  # ── Crypto via Binance — end-of-day bars ─────────────────────────────────
-  # Binance has daily klines back to 2017 for major pairs.
-  - class: crypto_eod
-    provider: binance
-    interval: "1d"
-    backfillYears: 7    # override: EOD goes back further than 1m data
-    enabled: true
-    groups: []
-    tickers:
-      - BTCUSDT
-      - ETHUSDT
-      - BNBUSDT
-      - SOLUSDT
-      - XRPUSDT
-      - ADAUSDT
-      - AVAXUSDT
-      - DOTUSDT
-      - LINKUSDT
-      - MATICUSDT
-    validate: false
-
-  # ── Forex via TwelveData — 1-minute bars ─────────────────────────────────
+  # ── Forex via TwelveData — multiple frames ───────────────────────────────
   # Symbol format for TwelveData: "EUR/USD" (with slash)
   - class: forex
     provider: twelvedata
-    interval: "1min"
+    backfillYears: 10   # TwelveData has forex history back to ~2010
+    frames:
+      - name: M1
+        sinkFrames: [M1, M5, M15, M30, H1, H4]
     enabled: false
     groups: []
     tickers:
@@ -151,24 +140,15 @@ assets:
       - USD/CHF
     validate: false
 
-  # ── Vietnamese stocks via VCI — 1-minute bars ─────────────────────────────
+  # ── Vietnamese stocks via VCI — multiple frames ──────────────────────────
   - class: vn
     provider: vci
-    timeFrame: ONE_MINUTE
-    enabled: true
-    groups:
-      - VN30
-      # - VN100
-    tickers: []
-    validate: false
-
-  # ── Vietnamese stocks via VCI — end-of-day bars ────────────────────────────
-  # EOD goes back much further than minute data.
-  # VCI GetOHLC caps at 5000 bars per request (~20 trading years).
-  - class: vn_eod
-    provider: vci
-    timeFrame: ONE_DAY
-    backfillYears: 25   # override: "toàn thời gian" — API will cap at 5000 bars (~20y)
+    backfillYears: 3    # VCI minute history is roughly 2.5y
+    frames:
+      - name: M1
+        sinkFrames: [M1, M5, M15, M30, H1, H4]
+      - name: D1
+        backfillYears: 25
     enabled: true
     groups:
       - VN30
