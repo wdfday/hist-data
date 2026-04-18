@@ -58,7 +58,7 @@ schedule:
 
 # ── Global data settings ───────────────────────────────────────────────────
 data:
-  dir: data             # root output directory; relative or absolute (e.g. ../data, /mnt/storage/hist); override via DATA_DIR env
+  dir: /mallow/data             # root output directory; relative or absolute (e.g. ../data, /mnt/storage/hist); override via DATA_DIR env
   format: parquet       # parquet | csv | json; override via SAVE_FORMAT env
 
 
@@ -79,7 +79,7 @@ assets:
         sinkFrames: [M1, M5, M15, M30, H1, H4]
     enabled: true
     groups:
-      - sp500           # ~503 stocks, free (GitHub CSV)
+      #      - sp500           # ~503 stocks, free (GitHub CSV)
       - nasdaq100       # ~101 stocks, free (Wikipedia)
     tickers: []
     validate: false

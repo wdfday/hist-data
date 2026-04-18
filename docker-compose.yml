@@ -17,7 +17,7 @@ services:
       # - SAVE_FORMAT=parquet
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - ${DATA_DIR_HOST:-./data}:/app/data
+      - ${DATA_DIR_HOST:-../data}:/mallow/data
     restart: unless-stopped
 
 networks:
