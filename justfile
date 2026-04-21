@@ -2,10 +2,6 @@
 default:
     @just --list
 
-# Regenerate Wire DI (sau khi sửa wire.go hoặc app/di.go)
-wire:
-    go generate ./cmd/us-data/
-
 # Build Go binary locally
 build:
     go build -o main ./cmd/us-data/
