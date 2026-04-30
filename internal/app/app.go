@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"hist-data/internal/crawl"
+	"hist-data/internal/saver"
 )
 
 // App holds all wired dependencies for the historical data crawling service.
@@ -62,6 +63,17 @@ func Run(ctx context.Context) {
 		slog.Error("init failed", "error", err)
 		os.Exit(1)
 	}
+
+	ps, _ := buildPacketSaver(cfg)
+	if ps != nil {
+		for _, provider := range []string{"binance", "okx", "massive", "vci", "twelvedata"} {
+			dir := cfg.ProviderSaveDir(provider)
+			if err := saver.CompactMonthly(dir, ps); err != nil {
+				slog.Warn("compact monthly failed", "provider", provider, "err", err)
+			}
+		}
+	}
+
 	a.run(ctx)
 }
 

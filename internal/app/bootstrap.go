@@ -32,14 +32,16 @@ func ResolveTargetsByProvider(cfg *Config) (map[string][]crawl.Job, error) {
 		var err error
 
 		switch prov {
-		case "binance", "twelvedata":
+		case "binance", "binanceflat", "okx", "twelvedata":
 			tickers = asset.Tickers
 			slog.Info("tickers from config", "key", key, "count", len(tickers))
 
 		case "vci":
 			tickers, err = resolveVCITickers(cfg.VCI.BaseURL, asset.Groups, asset.Tickers)
 			if err != nil {
-				return nil, fmt.Errorf("resolve vci tickers: %w", err)
+				slog.Warn("skipping asset: vci ticker resolution failed",
+					"key", key, "err", err)
+				continue
 			}
 			slog.Info("tickers resolved", "key", key, "count", len(tickers))
 
@@ -53,13 +55,20 @@ func ResolveTargetsByProvider(cfg *Config) (map[string][]crawl.Job, error) {
 				Validate: asset.Validate,
 			})
 			if err != nil {
-				return nil, fmt.Errorf("resolve %s tickers: %w", key, err)
+				slog.Warn("skipping asset: polygon ticker resolution failed",
+					"key", key, "err", err)
+				continue
 			}
 			tickers = syms
 			slog.Info("tickers resolved", "key", key, "count", len(tickers))
 		}
 
-		jobs := crawl.BuildTargets(tickers, saveDir, prov, class)
+		if len(tickers) == 0 {
+			slog.Warn("skipping asset: no tickers resolved", "key", key)
+			continue
+		}
+
+		jobs := crawl.BuildTargets(tickers, saveDir, prov, asset.Frame.Name, class)
 		result[key] = append(result[key], jobs...)
 	}
 

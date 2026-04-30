@@ -311,6 +311,11 @@ func (c *Crawler) FetchBars(ticker, apiKey string, from, to time.Time) ([]model.
 	if client == nil {
 		client = http.DefaultClient
 	}
+	// Polygon has no public listing-time endpoint; full-history mode (zero from)
+	// defaults to 5 years, matching the free-tier history limit.
+	if from.IsZero() {
+		from = to.AddDate(-5, 0, 0)
+	}
 
 	allBars := make([]model.Bar, 0, c.estimatedBars(from, to))
 	chunks := splitDateRangeIntoChunks(from, to, c.maxDaysPerChunk())
@@ -365,9 +370,12 @@ func (c *Crawler) FetchBars(ticker, apiKey string, from, to time.Time) ([]model.
 }
 
 // SaveBars persists bars into dir/ticker/ using the configured PacketSaver.
-// Filters to regular NYSE/NASDAQ session (9:30–16:00 ET) before saving.
+// For intraday frames (M1–H4), filters to regular NYSE/NASDAQ session (9:30–16:00 ET).
+// Daily and higher frames are saved as-is — their timestamps are at midnight/open.
 func (c *Crawler) SaveBars(dir, ticker string, from, to time.Time, bars []model.Bar) {
-	bars = filterRegularHours(bars)
+	if isIntradayFrame(c.FrameLabel) {
+		bars = filterRegularHours(bars)
+	}
 	frameLabel := c.FrameLabel
 	if frameLabel == "" {
 		frameLabel = strings.ToUpper(c.timespanLabel())
@@ -382,6 +390,14 @@ var etLocation = func() *time.Location {
 	}
 	return loc
 }()
+
+func isIntradayFrame(label string) bool {
+	switch strings.ToUpper(strings.TrimSpace(label)) {
+	case "M1", "M5", "M15", "M30", "H1", "H4":
+		return true
+	}
+	return false
+}
 
 // filterRegularHours keeps only bars within NYSE/NASDAQ regular session:
 // 9:30–16:00 ET (handles EST/EDT automatically).

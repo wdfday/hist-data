@@ -12,6 +12,7 @@ import (
 
 type providerPolicy struct {
 	name           string
+	lastDayPath    string
 	runHour        int
 	runMinute      int
 	rateLimit      time.Duration
@@ -25,24 +26,48 @@ func newProviderPolicy(cfg *Config, provider string) providerPolicy {
 	case "binance":
 		return providerPolicy{
 			name:           provider,
+			lastDayPath:    cfg.ProviderLastDayPath(provider),
 			runHour:        scheduledAt(cfg.Binance.Schedule.RunHour, cfg.Binance.Schedule.RunMinute, cfg).hour,
 			runMinute:      scheduledAt(cfg.Binance.Schedule.RunHour, cfg.Binance.Schedule.RunMinute, cfg).minute,
 			rateLimit:      secondsToDuration(cfg.Binance.RateLimitSec),
 			workerKeys:     workerSlots(cfg.Binance.Workers),
 			resolveLastDay: func() (time.Time, error) { return yesterday(), nil },
 		}
+	case "binanceflat":
+		return providerPolicy{
+			name:           provider,
+			lastDayPath:    cfg.ProviderLastDayPath(provider),
+			runHour:        scheduledAt(cfg.BinanceFlat.Schedule.RunHour, cfg.BinanceFlat.Schedule.RunMinute, cfg).hour,
+			runMinute:      scheduledAt(cfg.BinanceFlat.Schedule.RunHour, cfg.BinanceFlat.Schedule.RunMinute, cfg).minute,
+			rateLimit:      0, // CDN flat-file — no rate limit
+			workerKeys:     workerSlots(cfg.BinanceFlat.Workers),
+			resolveLastDay: func() (time.Time, error) { return yesterday(), nil },
+		}
 	case "twelvedata":
 		return providerPolicy{
 			name:           provider,
+			lastDayPath:    cfg.ProviderLastDayPath(provider),
 			runHour:        scheduledAt(cfg.TwelveData.Schedule.RunHour, cfg.TwelveData.Schedule.RunMinute, cfg).hour,
 			runMinute:      scheduledAt(cfg.TwelveData.Schedule.RunHour, cfg.TwelveData.Schedule.RunMinute, cfg).minute,
 			rateLimit:      secondsToDuration(cfg.TwelveData.RateLimitSec),
 			workerKeys:     workerSlots(cfg.TwelveData.Workers),
 			resolveLastDay: func() (time.Time, error) { return yesterday(), nil },
 		}
+	case "okx":
+		return providerPolicy{
+			name:           provider,
+			lastDayPath:    cfg.ProviderLastDayPath(provider),
+			runHour:        scheduledAt(cfg.OKX.Schedule.RunHour, cfg.OKX.Schedule.RunMinute, cfg).hour,
+			runMinute:      scheduledAt(cfg.OKX.Schedule.RunHour, cfg.OKX.Schedule.RunMinute, cfg).minute,
+			rateLimit:      secondsToDuration(cfg.OKX.RateLimitSec),
+			workerKeys:     workerSlots(cfg.OKX.Workers),
+			runSequential:  true, // share IP rate-limit budget across frames
+			resolveLastDay: func() (time.Time, error) { return yesterday(), nil },
+		}
 	case "vci":
 		return providerPolicy{
 			name:          provider,
+			lastDayPath:   cfg.ProviderLastDayPath(provider),
 			runHour:       scheduledAt(cfg.VCI.Schedule.RunHour, cfg.VCI.Schedule.RunMinute, cfg).hour,
 			runMinute:     scheduledAt(cfg.VCI.Schedule.RunHour, cfg.VCI.Schedule.RunMinute, cfg).minute,
 			rateLimit:     secondsToDuration(cfg.VCI.RateLimitSec),
@@ -61,11 +86,13 @@ func newProviderPolicy(cfg *Config, provider string) providerPolicy {
 		}
 	default:
 		return providerPolicy{
-			name:       "massive",
-			runHour:    scheduledAt(cfg.Massive.Schedule.RunHour, cfg.Massive.Schedule.RunMinute, cfg).hour,
-			runMinute:  scheduledAt(cfg.Massive.Schedule.RunHour, cfg.Massive.Schedule.RunMinute, cfg).minute,
-			rateLimit:  secondsToDuration(cfg.Massive.RateLimitSec),
-			workerKeys: massiveWorkerKeys(cfg.Massive.Keys, cfg.Massive.Workers),
+			name:          "massive",
+			lastDayPath:   cfg.ProviderLastDayPath("massive"),
+			runHour:       scheduledAt(cfg.Massive.Schedule.RunHour, cfg.Massive.Schedule.RunMinute, cfg).hour,
+			runMinute:     scheduledAt(cfg.Massive.Schedule.RunHour, cfg.Massive.Schedule.RunMinute, cfg).minute,
+			rateLimit:     secondsToDuration(cfg.Massive.RateLimitSec),
+			workerKeys:    massiveWorkerKeys(cfg.Massive.Keys, cfg.Massive.Workers),
+			runSequential: true, // share rate-limit budget across frames (D1, M1, …)
 			resolveLastDay: func() (time.Time, error) {
 				if len(cfg.Massive.Keys) == 0 {
 					return time.Time{}, nil
@@ -107,6 +134,7 @@ func (p providerPolicy) gateRunners(runners []*crawl.Runner, processedAsOf time.
 
 	slog.Info("provider: new trading day available",
 		"provider", p.name, "last_day", lastDay.Format("2006-01-02"))
+	_ = crawl.WriteProviderLastDay(p.lastDayPath, p.name, lastDay)
 	for _, runner := range runners {
 		runner.AsOf = lastDay
 	}

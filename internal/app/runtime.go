@@ -36,19 +36,21 @@ func buildGroups(cfg *Config, providers map[string]crawl.BarFetcher, jobsByProvi
 			continue
 		}
 
-		backfillYears := 0
+		var fromDate time.Time
+		frameName := ""
 		if asset := assetForKey(cfg, key); asset != nil {
-			backfillYears = asset.Frame.BackfillYears
+			frameName = asset.Frame.Name
+			fromDate = asset.Frame.fromDate()
 		}
-
 		runner := &crawl.Runner{
-			Fetcher:       fetcher,
-			APIKeys:       group.policy.workerKeys,
-			Targets:       jobs,
-			SaveBaseDir:   cfg.ProviderSaveDir(provider),
-			ProgressPath:  cfg.ProviderProgressPath(provider),
-			BackfillYears: backfillYears,
-			RateLimit:     group.policy.rateLimit,
+			Fetcher:      fetcher,
+			APIKeys:      group.policy.workerKeys,
+			Targets:      jobs,
+			SaveBaseDir:  cfg.ProviderSaveDir(provider),
+			ProgressPath: cfg.ProviderFrameProgressPath(provider, frameName),
+			LegacyPath:   cfg.ProviderLastDayPath(provider),
+			FromDate:     fromDate,
+			RateLimit:    group.policy.rateLimit,
 		}
 		group.runners = append(group.runners, runner)
 		slog.Info("runner ready", "key", key, "jobs", len(jobs), "workers", len(group.policy.workerKeys))

@@ -11,16 +11,18 @@ import (
 )
 
 // ProgressUpdate is sent when a crawl unit succeeds.
-// We include Source/Class so that the same symbol (e.g. "BTCUSD") in different
-// markets/providers can be tracked independently in the progress file.
+// We include Source/Class/Frame so that the same symbol (e.g. "BTCUSD") in
+// different markets/providers/timeframes can be tracked independently in the
+// progress file.
 type ProgressUpdate struct {
 	Source string
 	Class  AssetClass
+	Frame  string
 	Ticker string
 	Date   string
 }
 
-func progressKey(source string, class AssetClass, symbol string) string {
+func progressKey(source string, class AssetClass, frame, symbol string) string {
 	s := strings.TrimSpace(strings.ToLower(source))
 	if s == "" {
 		s = DefaultSource
@@ -29,7 +31,8 @@ func progressKey(source string, class AssetClass, symbol string) string {
 	if c == "" {
 		c = string(DefaultAssetClass)
 	}
-	return fmt.Sprintf("%s:%s:%s", s, c, strings.ToUpper(strings.TrimSpace(symbol)))
+	f := strings.ToUpper(strings.TrimSpace(frame))
+	return fmt.Sprintf("%s:%s:%s:%s", s, c, f, strings.ToUpper(strings.TrimSpace(symbol)))
 }
 
 func loadProgress(path string) map[string]string {
@@ -44,6 +47,13 @@ func loadProgress(path string) map[string]string {
 	return m
 }
 
+func loadProgressFrom(path string) map[string]string {
+	if strings.TrimSpace(path) == "" {
+		return map[string]string{}
+	}
+	return loadProgress(path)
+}
+
 func saveProgress(path string, m map[string]string) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -55,51 +65,70 @@ func saveProgress(path string, m map[string]string) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-// BootstrapProgress ensures that progress file has an entry for every Job
-// identity (Source/Class/Ticker). For missing ones it seeds last-day so that
-// the next crawl starts from backfillYears ago.
-func BootstrapProgress(path string, targets []Job, now time.Time, backfillYears int) {
+// MigrateLegacyProgress copies entries from the old .lastday.json file (or any
+// other legacyPath) into the new .lastrun.success.json when the latter is
+// missing entries for those targets. No synthetic seeding — targets without a
+// progress entry are left absent so resolveJobRange falls back to the configured
+// backfillYears (or hands the crawler a zero `from` for full-history mode).
+func MigrateLegacyProgress(path, legacyPath string, targets []Job) {
+	if strings.TrimSpace(legacyPath) == "" {
+		return
+	}
+	legacy := loadProgressFrom(legacyPath)
+	if len(legacy) == 0 {
+		return
+	}
 	m := loadProgress(path)
 	if m == nil {
 		m = make(map[string]string)
 	}
-
-	start := time.Date(now.Year()-backfillYears, now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	seedLast := start.AddDate(0, 0, -1).Format("2006-01-02") // last + 1 = start
-
-	added := 0
+	updated := 0
 	for _, target := range targets {
-		key := progressKey(target.Source, target.Class, target.Ticker)
+		key := progressKey(target.Source, target.Class, target.Frame, target.Ticker)
 		if _, ok := m[key]; ok {
 			continue
 		}
-		// Backwards-compat: if legacy plain ticker entry exists, keep it and
-		// don't overwrite; future writes will use the new composite key.
-		if _, okLegacy := m[target.Ticker]; okLegacy {
-			continue
+		if old, ok := legacy[key]; ok && old != "" {
+			m[key] = old
+			updated++
 		}
-		m[key] = seedLast
-		added++
 	}
-	if added == 0 {
+	if updated == 0 {
 		return
 	}
-
 	if err := saveProgress(path, m); err != nil {
-		slog.Warn("progress bootstrap write failed", "err", err)
+		slog.Warn("progress migrate write failed", "err", err)
 		return
 	}
-	slog.Info("progress bootstrapped", "path", path, "new_entries", added)
+	slog.Info("progress migrated from legacy", "path", path, "entries", updated)
 }
 
 // RunProgressWriter receives updates and persists to file (run as goroutine)
 func RunProgressWriter(path string, updates <-chan ProgressUpdate) {
 	m := loadProgress(path)
 	for u := range updates {
-		key := progressKey(u.Source, u.Class, u.Ticker)
+		key := progressKey(u.Source, u.Class, u.Frame, u.Ticker)
 		m[key] = u.Date
 		if err := saveProgress(path, m); err != nil {
 			slog.Warn("progress write failed", "ticker", u.Ticker, "err", err)
 		}
 	}
+}
+
+func WriteProviderLastDay(path, provider string, day time.Time) error {
+	if strings.TrimSpace(path) == "" || day.IsZero() {
+		return nil
+	}
+	payload := map[string]string{
+		"provider": provider,
+		"last_day": day.UTC().Format("2006-01-02"),
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
 }

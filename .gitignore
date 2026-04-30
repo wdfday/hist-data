@@ -12,7 +12,6 @@ main
 *.dylib
 /vendor/
 # Crawled data
-/data/*
 
 # Generated
 tickers.json

@@ -59,11 +59,11 @@ func TestBarsForFrame_NonM1Source_Error(t *testing.T) {
 	}
 }
 
-func TestBarsForFrame_UnsupportedSink_Error(t *testing.T) {
+func TestBarsForFrame_SinkLowerThanSource_Error(t *testing.T) {
 	input := []model.Bar{bar(time.Unix(0, 0), 1, 2, 0.5, 1.5, 100)}
-	_, err := barsForFrame("M1", "D1", input)
+	_, err := barsForFrame("H1", "M5", input)
 	if err == nil {
-		t.Fatal("expected error for unsupported sink D1")
+		t.Fatal("expected error: sink M5 lower than source H1")
 	}
 }
 

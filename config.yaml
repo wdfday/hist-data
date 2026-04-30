@@ -5,7 +5,6 @@
 # Free tier: 1 key, 5 req/min (12 s cooldown).
 massive:
   baseUrl: "https://api.polygon.io"
-  keys: []              # set via POLYGON_API_KEYS env — never commit keys
   workers: 0            # 0 = one goroutine per key (default); set higher on pro plan (e.g. 1 key × 5 workers)
   rateLimit: 12         # seconds between requests per worker; free tier = 5 req/min → 12s cooldown
   schedule:
@@ -13,16 +12,33 @@ massive:
     runMinute: 0        # US markets close ~8 PM ET; +8h buffer to settle
 
 
-# ── Binance (Crypto, public API — no key required) ─────────────────────────
+# ── Binance (Crypto, REST API — no key required) ────────────────────────────
 binance:
   baseUrl: "https://api.binance.com"
-  # Rate limit: ~1200 weight/min per IP; each klines call = 2 weight.
-  # workers=3 → ~100 req/min → safe headroom. Do NOT set > 10.
-  workers: 3
-  rateLimit: 0          # no per-request delay needed; weight budget handles it
+  workers: 1
+  rateLimit: 1          # seconds between requests
+  schedule:
+    runHour: 0
+    runMinute: 30
+
+
+# ── BinanceFlat (Crypto, flat-file CDN — no key, no rate limit) ─────────────
+binanceflat:
+  baseUrl: "https://data.binance.vision"  # flat-file CDN; override only for testing
+  workers: 5            # parallel monthly-ZIP downloads per symbol; CDN has no rate limit
   schedule:
     runHour: 0          # UTC midnight — crypto trades 24/7, run at day rollover
     runMinute: 30
+
+
+# ── OKX (Crypto, public API — no key required) ────────────────────────────
+okx:
+  baseUrl: "https://www.okx.com"
+  workers: 1
+  rateLimit: 4          # public endpoints: 40 req/2s; no delay needed
+  schedule:
+    runHour: 0          # UTC midnight — crypto 24/7, run at day rollover
+    runMinute: 45       # offset from Binance (00:30) to avoid concurrent I/O
 
 
 # ── TwelveData (Forex + multi-asset — requires API key) ────────────────────
@@ -58,25 +74,29 @@ schedule:
 
 # ── Global data settings ───────────────────────────────────────────────────
 data:
-  dir: /mallow/data             # root output directory; relative or absolute (e.g. ../data, /mnt/storage/hist); override via DATA_DIR env
-  format: parquet       # parquet | csv | json; override via SAVE_FORMAT env
+  dir: data             # relative → anchored to dir of config.yaml (repo root); absolute → kept as-is (Docker); override via DATA_DIR env
+  format: parquet       # parquet | csv | JSON; override via SAVE_FORMAT env
 
 
 # ── Asset pipelines ────────────────────────────────────────────────────────
 # Each entry = one independent crawl pipeline definition.
-# `backfillYears` must be declared at the data type level or overridden per frame.
+# `backfillYears` is set per frame: 0 = full history (crawler self-resolves
+# via provider listTime / onboardDate / backward pagination); >0 = limit to N
+# years from asOf.
 # Each frame expands into its own runtime pipeline key: "provider:class:frame".
 # `sinkFrames` on a frame derives additional timeframes from M1 source data.
 # Legacy fields (`timespan`, `interval`, `timeFrame`) still work during migration.
 assets:
 
-  # ── US Stocks via Polygon ─────────────────────────────────────────────────
+  # ── US Stocks via Polygon — EOD only ─────────────────────────────────────
   - class: stocks
     provider: massive
-    backfillYears: 2    # Polygon has 10+ years; 2y covers 1 full market cycle
     frames:
       - name: M1
         sinkFrames: [M1, M5, M15, M30, H1, H4]
+        from: "2024-05"
+      - name: D1
+        from: "2024-01"     # Polygon free tier ≈ 5y
     enabled: true
     groups:
       #      - sp500           # ~503 stocks, free (GitHub CSV)
@@ -84,30 +104,25 @@ assets:
     tickers: []
     validate: false
 
-  # ── US Indices via Polygon (Starter+ plan required) ───────────────────────
-  - class: indices
-    provider: massive
-    backfillYears: 2
+  # ── Crypto via Binance REST API (disabled — use binanceflat instead) ────────
+  - class: crypto
+    provider: binance
     frames:
-      - name: M1
-        sinkFrames: [M1, M5, M15, M30, H1, H4]
+      - name: D1
+        from: ""            # empty = full history
     enabled: false
     groups: []
     tickers:
-      - I:SPX           # S&P 500
-      - I:NDX           # NASDAQ-100
+      - BTCUSDT
     validate: false
 
-  # ── Crypto via Binance — multiple frames ─────────────────────────────────
+  # ── Crypto via BinanceFlat CDN — EOD only ────────────────────────────────
   - class: crypto
-    provider: binance
-    backfillYears: 4    # crypto: 4y covers 2 halving cycles (2020, 2024)
+    provider: binanceflat
     frames:
-      - name: M1
-        sinkFrames: [M1, M5, M15, M30, H1, H4]
       - name: D1
-        backfillYears: 7
-    enabled: true
+        from: ""            # empty = full history (resolved via exchangeInfo onboardDate)
+    enabled: false
     groups: []
     tickers:
       - BTCUSDT
@@ -122,14 +137,34 @@ assets:
       - MATICUSDT
     validate: false
 
-  # ── Forex via TwelveData — multiple frames ───────────────────────────────
+  # ── Crypto via OKX — EOD only ────────────────────────────────────────────
+  - class: crypto
+    provider: okx
+    frames:
+      - name: D1
+        from: ""            # empty = full history (resolved via /public/instruments listTime)
+    enabled: false
+    groups: []
+    tickers:
+      - BTC-USDT
+      - ETH-USDT
+      - BNB-USDT
+      - SOL-USDT
+      - XRP-USDT
+      - ADA-USDT
+      - AVAX-USDT
+      - DOT-USDT
+      - LINK-USDT
+      - POL-USDT
+    validate: false
+
+  # ── Forex via TwelveData — EOD only ──────────────────────────────────────
   # Symbol format for TwelveData: "EUR/USD" (with slash)
   - class: forex
     provider: twelvedata
-    backfillYears: 10   # TwelveData has forex history back to ~2010
     frames:
-      - name: M1
-        sinkFrames: [M1, M5, M15, M30, H1, H4]
+      - name: D1
+        from: "2010"        # TwelveData forex history back to ~2010
     enabled: false
     groups: []
     tickers:
@@ -140,15 +175,16 @@ assets:
       - USD/CHF
     validate: false
 
-  # ── Vietnamese stocks via VCI — multiple frames ──────────────────────────
+  # ── Vietnamese stocks via VCI — EOD only ────────────────────────────────
   - class: vn
     provider: vci
-    backfillYears: 3    # VCI minute history is roughly 2.5y
     frames:
+      - name: D1
+#        sinkFrames: [W1, MN]
+        from: "2000"        # VCI daily history ≈ 25y
       - name: M1
         sinkFrames: [M1, M5, M15, M30, H1, H4]
-      - name: D1
-        backfillYears: 25
+        from: "2023-01"     # VCI minute history ≈ 1y
     enabled: true
     groups:
       - VN30
@@ -159,6 +195,6 @@ assets:
 
 # ── Logging ────────────────────────────────────────────────────────────────
 log:
-  level: info           # debug | info | warn | error; override via LOG_LEVEL env
-  format: json          # text (dev) | json (production)
+  level: debug           # debug | info | warn | error; override via LOG_LEVEL env
+  format: text          # text (dev) | JSON (production)
   file: "data/app.log"  # also written to stderr; remove to log stderr only

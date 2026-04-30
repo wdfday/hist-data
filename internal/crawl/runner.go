@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"hist-data/internal/model"
 )
 
 // Runner orchestrates one full crawl cycle.
@@ -19,14 +21,15 @@ import (
 //   - Worker   : pure compute — sends JobResult and LogEntry through channels, never calls slog
 //   - Log writer: single goroutine drains the log channel and calls slog (ordered output)
 type Runner struct {
-	Fetcher       BarFetcher
-	APIKeys       []string
-	Targets       []Job
-	ProgressPath  string
-	SaveBaseDir   string
-	BackfillYears int           // passed to ProgressProducer
-	AsOf          time.Time     // last date to include; zero = yesterday
-	RateLimit     time.Duration // minimum delay between requests per worker; 0 = no limit
+	Fetcher      BarFetcher
+	APIKeys      []string
+	Targets      []Job
+	ProgressPath string
+	LegacyPath   string // optional: previous progress file location for migration
+	SaveBaseDir  string
+	FromDate     time.Time     // fixed start date; zero = full history
+	AsOf         time.Time     // last date to include; zero = yesterday
+	RateLimit    time.Duration // minimum delay between requests per worker; 0 = no limit
 }
 
 // Run starts one crawl cycle asynchronously and returns a channel that receives
@@ -53,20 +56,26 @@ func (r *Runner) execute(ctx context.Context, done chan<- Done) {
 	go RunProgressWriter(r.ProgressPath, progressUpdates)
 	defer close(progressUpdates)
 
-	// Bootstrap must run before producer reads progress, so every target has an entry.
-	BootstrapProgress(r.ProgressPath, r.Targets, start, r.BackfillYears)
+	// Migrate any legacy progress entries before the producer reads progress.
+	MigrateLegacyProgress(r.ProgressPath, r.LegacyPath, r.Targets)
 
-	producer := NewProgressProducer(r.Targets, r.ProgressPath, r.BackfillYears)
+	producer := NewProgressProducer(r.Targets, r.ProgressPath, r.FromDate)
 	producer.AsOf = r.AsOf
 	jobCh := producer.Start(ctx)
 	successes, failures := r.runWorkers(ctx, jobCh, progressUpdates)
+	if ctx.Err() != nil {
+		slog.Info("graceful shutdown complete",
+			"targets", len(r.Targets),
+			"success", len(successes),
+			"failed", len(failures))
+	}
 
 	slog.Info("cycle done",
 		"success", len(successes), "failed", len(failures),
 		"duration", time.Since(start).Round(time.Second))
 
 	if len(successes) > 0 || len(failures) > 0 {
-		if err := writeRunReport(r.SaveBaseDir, successes, failures); err != nil {
+		if err := writeRunReport(r.SaveBaseDir, failures); err != nil {
 			slog.Warn("run report write failed", "err", err)
 		}
 	}
@@ -122,12 +131,27 @@ func (r *Runner) runWorkers(ctx context.Context, jobCh <-chan Job, progressUpdat
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	defer hbCancel()
 	go runHeartbeat(hbCtx, 15*time.Minute, &mu, &successCount, &failedCount, barsPerTicker)
+	go func() {
+		<-ctx.Done()
+		mu.Lock()
+		done := successCount + failedCount
+		remaining := len(r.Targets) - done
+		mu.Unlock()
+		if remaining < 0 {
+			remaining = 0
+		}
+		slog.Info("shutdown signal received; workers exiting",
+			"targets", len(r.Targets),
+			"completed", done,
+			"abandoned", remaining)
+	}()
 
 	// --- workers: each goroutine owns its API key ---
 	var wg sync.WaitGroup
 	wg.Add(len(r.APIKeys))
-	for _, key := range r.APIKeys {
+	for idx, key := range r.APIKeys {
 		key := key
+		workerID := idx + 1
 		go func() {
 			defer wg.Done()
 			for {
@@ -138,6 +162,17 @@ func (r *Runner) runWorkers(ctx context.Context, jobCh <-chan Job, progressUpdat
 					if !ok {
 						return
 					}
+					fromStr := "auto"
+					if !job.From.IsZero() {
+						fromStr = job.From.Format("2006-01-02")
+					}
+					logs <- LogEntry{slog.LevelInfo, "worker processing job", []any{
+						"worker_id", workerID,
+						"ticker", job.Ticker,
+						"class", job.Class,
+						"from", fromStr,
+						"to", job.To.Format("2006-01-02"),
+					}}
 					func() {
 						defer func() {
 							if rc := recover(); rc != nil {
@@ -147,7 +182,7 @@ func (r *Runner) runWorkers(ctx context.Context, jobCh <-chan Job, progressUpdat
 								results <- JobResult{Ok: false, Ticker: job.Ticker, Reason: "panic"}
 							}
 						}()
-						r.processJob(job, key, results, logs, progressUpdates)
+						r.processJob(job, key, workerID, results, logs, progressUpdates)
 					}()
 					if r.RateLimit > 0 {
 						select {
@@ -174,8 +209,11 @@ func (r *Runner) runWorkers(ctx context.Context, jobCh <-chan Job, progressUpdat
 // processJob fetches and saves bars for a fully-resolved Job.
 // All output goes through channels — results to resultCh, logs to logs.
 // This goroutine never calls slog directly.
-func (r *Runner) processJob(job Job, key string, results chan<- JobResult, logs chan<- LogEntry, progressUpdates chan<- ProgressUpdate) {
-	fromStr := job.From.Format("2006-01-02")
+func (r *Runner) processJob(job Job, key string, workerID int, results chan<- JobResult, logs chan<- LogEntry, progressUpdates chan<- ProgressUpdate) {
+	fromStr := "auto"
+	if !job.From.IsZero() {
+		fromStr = job.From.Format("2006-01-02")
+	}
 	toStr := job.To.Format("2006-01-02")
 
 	keyPfx := key
@@ -185,7 +223,7 @@ func (r *Runner) processJob(job Job, key string, results chan<- JobResult, logs 
 
 	logs <- LogEntry{slog.LevelInfo, "fetch start", []any{
 		"ticker", job.Ticker, "class", job.Class,
-		"from", fromStr, "to", toStr, "key", keyPfx,
+		"from", fromStr, "to", toStr, "key", keyPfx, "worker_id", workerID,
 	}}
 
 	bars, err := r.Fetcher.FetchBars(job.Ticker, key, job.From, job.To)
@@ -194,7 +232,7 @@ func (r *Runner) processJob(job Job, key string, results chan<- JobResult, logs 
 	case err != nil:
 		logs <- LogEntry{slog.LevelError, "fetch error", []any{
 			"ticker", job.Ticker, "class", job.Class,
-			"from", fromStr, "to", toStr, "key", keyPfx, "err", err,
+			"from", fromStr, "to", toStr, "key", keyPfx, "worker_id", workerID, "err", err,
 		}}
 		results <- JobResult{
 			Ok: false, Ticker: job.Ticker,
@@ -212,10 +250,15 @@ func (r *Runner) processJob(job Job, key string, results chan<- JobResult, logs 
 		}
 
 	default:
+		lastSuccessDate := latestBarDate(bars)
+		if lastSuccessDate == "" {
+			lastSuccessDate = toStr
+		}
 		r.Fetcher.SaveBars(job.SaveDir, job.Ticker, job.From, job.To, bars)
 		logs <- LogEntry{slog.LevelInfo, "fetch ok", []any{
 			"ticker", job.Ticker, "class", job.Class,
-			"from", fromStr, "to", toStr, "bars", len(bars), "key", keyPfx,
+			"from", fromStr, "to", toStr, "bars", len(bars), "key", keyPfx, "worker_id", workerID,
+			"last_success_day", lastSuccessDate,
 		}}
 		results <- JobResult{
 			Ok: true, Ticker: job.Ticker,
@@ -224,8 +267,8 @@ func (r *Runner) processJob(job Job, key string, results chan<- JobResult, logs 
 
 		select {
 		case progressUpdates <- ProgressUpdate{
-			Source: job.Source, Class: job.Class,
-			Ticker: job.Ticker, Date: toStr,
+			Source: job.Source, Class: job.Class, Frame: job.Frame,
+			Ticker: job.Ticker, Date: lastSuccessDate,
 		}:
 		default:
 			logs <- LogEntry{slog.LevelWarn, "progress update dropped", []any{
@@ -233,6 +276,19 @@ func (r *Runner) processJob(job Job, key string, results chan<- JobResult, logs 
 			}}
 		}
 	}
+}
+
+func latestBarDate(bars []model.Bar) string {
+	if len(bars) == 0 {
+		return ""
+	}
+	maxTs := bars[0].Timestamp
+	for i := 1; i < len(bars); i++ {
+		if bars[i].Timestamp > maxTs {
+			maxTs = bars[i].Timestamp
+		}
+	}
+	return time.UnixMilli(maxTs).UTC().Format("2006-01-02")
 }
 
 // ---------------------------------------------------------------------------

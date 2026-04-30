@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
@@ -20,7 +21,7 @@ var logLevel = new(slog.LevelVar) // defaults to Info
 // AssetConfig describes one asset class to crawl.
 type AssetConfig struct {
 	Class    string   `mapstructure:"class"`
-	Provider string   `mapstructure:"provider"` // massive | binance | twelvedata | vci
+	Provider string   `mapstructure:"provider"` // massive | binance | twelvedata | vci | okx
 	Enabled  bool     `mapstructure:"enabled"`
 	Groups   []string `mapstructure:"groups"`   // sp500 | nasdaq100 | dji | all (Polygon only)
 	Tickers  []string `mapstructure:"tickers"`  // explicit individual symbols
@@ -37,15 +38,35 @@ type AssetConfig struct {
 	Multiplier int      `mapstructure:"multiplier"` // massive: e.g. 1, 5, 15
 	Intervals  []string `mapstructure:"interval"`   // binance: 1m|5m|1h|1d|...
 	TimeFrames []string `mapstructure:"timeFrame"`  // vci: ONE_DAY|ONE_MINUTE|ONE_HOUR
-
-	// BackfillYears applies to this data pipeline when a frame does not override it.
-	BackfillYears int `mapstructure:"backfillYears"`
 }
 
 type FrameSpec struct {
-	Name          string   `mapstructure:"name"`
-	BackfillYears int      `mapstructure:"backfillYears"`
-	SinkFrames    []string `mapstructure:"sinkFrames"`
+	Name       string   `mapstructure:"name"`
+	From       string   `mapstructure:"from"`      // "YYYY", "YYYY-MM", or "YYYY-MM-DD"; 0/empty = full history
+	FromYear   int      `mapstructure:"fromYear"`  // legacy: use From instead
+	FromMonth  int      `mapstructure:"fromMonth"` // legacy: use From instead
+	SinkFrames []string `mapstructure:"sinkFrames"`
+}
+
+// fromDate parses the From string ("YYYY", "YYYY-MM", "YYYY-MM-DD").
+// Falls back to FromYear/FromMonth for backward compatibility.
+// Returns zero time when no start date is configured (= full history).
+func (f FrameSpec) fromDate() time.Time {
+	if f.From != "" {
+		for _, layout := range []string{"2006-01-02", "2006-01", "2006"} {
+			if t, err := time.Parse(layout, strings.TrimSpace(f.From)); err == nil {
+				return t.UTC()
+			}
+		}
+	}
+	if f.FromYear > 0 {
+		month := time.Month(f.FromMonth)
+		if month < 1 || month > 12 {
+			month = time.January
+		}
+		return time.Date(f.FromYear, month, 1, 0, 0, 0, 0, time.UTC)
+	}
+	return time.Time{}
 }
 
 // Config is the application configuration loaded from config.yaml with env overrides.
@@ -69,7 +90,7 @@ type Config struct {
 		Format string `mapstructure:"format"` // parquet | csv | json
 	} `mapstructure:"data"`
 
-	// Binance — crypto klines (public API, no key required)
+	// Binance — crypto klines via REST API (no key required)
 	Binance struct {
 		BaseURL      string `mapstructure:"baseUrl"`   // default: https://api.binance.com
 		Workers      int    `mapstructure:"workers"`   // parallel download goroutines
@@ -79,6 +100,16 @@ type Config struct {
 			RunMinute int `mapstructure:"runMinute"`
 		} `mapstructure:"schedule"`
 	} `mapstructure:"binance"`
+
+	// BinanceFlat — crypto klines via flat-file CDN (data.binance.vision, no key, no rate limit)
+	BinanceFlat struct {
+		BaseURL  string `mapstructure:"baseUrl"` // default: https://data.binance.vision
+		Workers  int    `mapstructure:"workers"` // parallel ZIP downloads; CDN has no rate limit
+		Schedule struct {
+			RunHour   int `mapstructure:"runHour"`
+			RunMinute int `mapstructure:"runMinute"`
+		} `mapstructure:"schedule"`
+	} `mapstructure:"binanceflat"`
 
 	// TwelveData — forex, stocks, ETFs, indices, crypto (requires API key)
 	// Free tier: 8 req/min, 800 credits/day. Set workers: 1 on free plan.
@@ -103,6 +134,17 @@ type Config struct {
 			RunMinute int `mapstructure:"runMinute"`
 		} `mapstructure:"schedule"`
 	} `mapstructure:"vci"`
+
+	// OKX — crypto klines (public API, no key required)
+	OKX struct {
+		BaseURL      string `mapstructure:"baseUrl"`   // default: https://www.okx.com
+		Workers      int    `mapstructure:"workers"`   // parallel download goroutines
+		RateLimitSec int    `mapstructure:"rateLimit"` // seconds between requests per worker; 0 = no limit
+		Schedule     struct {
+			RunHour   int `mapstructure:"runHour"`
+			RunMinute int `mapstructure:"runMinute"`
+		} `mapstructure:"schedule"`
+	} `mapstructure:"okx"`
 
 	// Schedule is the global fallback run time (UTC).
 	// Each provider can override via its own schedule block.
@@ -141,11 +183,15 @@ func LoadConfig() (*Config, error) {
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "text")
 	v.SetDefault("binance.baseUrl", "https://api.binance.com")
-	v.SetDefault("binance.workers", 3)
+	v.SetDefault("binance.workers", 1)
+	v.SetDefault("binanceflat.baseUrl", "https://data.binance.vision")
+	v.SetDefault("binanceflat.workers", 5)
 	v.SetDefault("twelvedata.baseUrl", "https://api.twelvedata.com")
 	v.SetDefault("twelvedata.workers", 1)
 	v.SetDefault("vci.baseUrl", "https://trading.vietcap.com.vn/api")
 	v.SetDefault("vci.workers", 2)
+	v.SetDefault("okx.baseUrl", "https://www.okx.com")
+	v.SetDefault("okx.workers", 3)
 
 	// Bind env vars — picked up automatically by Unmarshal.
 	// Secrets are never in YAML; they live only in env.
@@ -169,10 +215,31 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
+	cfg.Data.Dir = resolveDataDir(cfg.Data.Dir, cfgFile)
+
 	if err := validateConfig(&cfg); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// resolveDataDir anchors a relative data dir to the directory of the config
+// file (which is the repo root in this project). Absolute paths are kept as-is
+// so Docker builds with `/mallow/hist-data/data` still work. An empty value
+// defaults to `<repo-root>/data`.
+func resolveDataDir(dir, cfgFile string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		dir = "data"
+	}
+	if filepath.IsAbs(dir) {
+		return filepath.Clean(dir)
+	}
+	cfgAbs, err := filepath.Abs(cfgFile)
+	if err != nil {
+		return filepath.Clean(dir)
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(cfgAbs), dir))
 }
 
 var supportedFrameNames = map[string]bool{
@@ -184,7 +251,7 @@ var supportedFrameNames = map[string]bool{
 	"H4":  true,
 	"D1":  true,
 	"W1":  true,
-	"MO1": true,
+	"MN":  true,
 }
 
 func validateConfig(cfg *Config) error {
@@ -222,10 +289,21 @@ func validateConfig(cfg *Config) error {
 				return fmt.Errorf("asset %q: frame name must not be empty", a.Class)
 			}
 			if !supportedFrameNames[frame.Name] {
-				return fmt.Errorf("asset %q: unsupported frame %q (allowed: M1, M5, M15, M30, H1, H4, D1, W1, MO1)", a.Class, frame.Name)
+				return fmt.Errorf("asset %q: unsupported frame %q (allowed: M1, M5, M15, M30, H1, H4, D1, W1, MN)", a.Class, frame.Name)
 			}
-			if frame.BackfillYears <= 0 {
-				return fmt.Errorf("asset %q frame %q: backfillYears must be > 0", a.Class, frame.Name)
+			if frame.From != "" {
+				valid := false
+				for _, layout := range []string{"2006-01-02", "2006-01", "2006"} {
+					if _, err := time.Parse(layout, strings.TrimSpace(frame.From)); err == nil {
+						valid = true
+						break
+					}
+				}
+				if !valid {
+					return fmt.Errorf("asset %q frame %q: invalid from %q (expected YYYY, YYYY-MM, or YYYY-MM-DD)", a.Class, frame.Name, frame.From)
+				}
+			} else if frame.FromYear < 0 {
+				return fmt.Errorf("asset %q frame %q: fromYear must be >= 0 (0 = full history)", a.Class, frame.Name)
 			}
 			if _, err := providerFrameSpec(prov, frame.Name); err != nil {
 				return fmt.Errorf("asset %q: %w", a.Class, err)
@@ -317,7 +395,7 @@ func (a AssetConfig) expand() []resolvedAsset {
 
 	out := make([]resolvedAsset, 0, len(frames))
 	for _, frame := range frames {
-		normalized := normalizeFrameSpec(frame, a.BackfillYears)
+		normalized := normalizeFrameSpec(frame)
 		out = append(out, resolvedAsset{
 			AssetConfig: a,
 			Frame:       normalized,
@@ -355,7 +433,7 @@ func (a AssetConfig) frameSpecs() []FrameSpec {
 	if len(a.Frames) > 0 {
 		out := make([]FrameSpec, 0, len(a.Frames))
 		for _, frame := range a.Frames {
-			out = append(out, normalizeFrameSpec(frame, a.BackfillYears))
+			out = append(out, normalizeFrameSpec(frame))
 		}
 		return out
 	}
@@ -373,8 +451,7 @@ func (a AssetConfig) legacyFrameSpecs() []FrameSpec {
 		out := make([]FrameSpec, 0, len(a.Timespans))
 		for _, timespan := range a.Timespans {
 			out = append(out, FrameSpec{
-				Name:          legacyMassiveFrameName(strings.TrimSpace(timespan), a.Multiplier),
-				BackfillYears: a.BackfillYears,
+				Name: legacyMassiveFrameName(strings.TrimSpace(timespan), a.Multiplier),
 			})
 		}
 		return out
@@ -385,8 +462,7 @@ func (a AssetConfig) legacyFrameSpecs() []FrameSpec {
 		out := make([]FrameSpec, 0, len(a.TimeFrames))
 		for _, timeFrame := range a.TimeFrames {
 			out = append(out, FrameSpec{
-				Name:          legacyVCIFrameName(strings.TrimSpace(timeFrame)),
-				BackfillYears: a.BackfillYears,
+				Name: legacyVCIFrameName(strings.TrimSpace(timeFrame)),
 			})
 		}
 		return out
@@ -397,24 +473,30 @@ func (a AssetConfig) legacyFrameSpecs() []FrameSpec {
 		out := make([]FrameSpec, 0, len(a.Intervals))
 		for _, interval := range a.Intervals {
 			out = append(out, FrameSpec{
-				Name:          legacyIntervalFrameName(strings.TrimSpace(interval)),
-				BackfillYears: a.BackfillYears,
+				Name: legacyIntervalFrameName(strings.TrimSpace(interval)),
 			})
 		}
 		return out
 	}
 }
 
-func normalizeFrameSpec(frame FrameSpec, defaultBackfill int) FrameSpec {
+func normalizeFrameSpec(frame FrameSpec) FrameSpec {
 	frame.Name = strings.ToUpper(strings.TrimSpace(frame.Name))
-	if frame.BackfillYears <= 0 {
-		frame.BackfillYears = defaultBackfill
+	frame.From = strings.TrimSpace(frame.From)
+	if frame.FromYear < 0 {
+		frame.FromYear = 0
 	}
 	// Normalize sink frame names in-place (uppercase, trim).
 	for i, s := range frame.SinkFrames {
 		frame.SinkFrames[i] = strings.ToUpper(strings.TrimSpace(s))
 	}
 	return frame
+}
+
+// knownFrames mirrors saver.frameRank — all valid frame names.
+var knownFrames = map[string]int{
+	"M1": 1, "M5": 2, "M15": 3, "M30": 4,
+	"H1": 5, "H4": 6, "D1": 7, "W1": 8, "MN": 9,
 }
 
 func validateSinkFrames(asset resolvedAsset) error {
@@ -426,24 +508,18 @@ func validateSinkFrames(asset resolvedAsset) error {
 		return fmt.Errorf("at least one sink frame is required")
 	}
 
-	// Only M1 source supports deriving other frames.
-	// Non-M1 frames must sink only to themselves.
-	if source != "M1" {
-		for _, sink := range asset.SinkFrames {
-			if sink != source {
-				return fmt.Errorf("source frame %q cannot derive sink %q: only M1 supports frame derivation", source, sink)
-			}
-		}
-		return nil
+	srcRank, srcOk := knownFrames[source]
+	if !srcOk {
+		return fmt.Errorf("unknown source frame %q", source)
 	}
 
-	allowed := map[string]bool{
-		"M1": true, "M5": true, "M15": true,
-		"M30": true, "H1": true, "H4": true,
-	}
 	for _, sink := range asset.SinkFrames {
-		if !allowed[sink] {
-			return fmt.Errorf("sink frame %q not supported for M1 source (allowed: M1, M5, M15, M30, H1, H4)", sink)
+		dstRank, dstOk := knownFrames[sink]
+		if !dstOk {
+			return fmt.Errorf("unknown sink frame %q", sink)
+		}
+		if dstRank < srcRank {
+			return fmt.Errorf("sink frame %q (rank %d) must be >= source frame %q (rank %d)", sink, dstRank, source, srcRank)
 		}
 	}
 	return nil
@@ -488,7 +564,7 @@ func legacyIntervalFrameName(interval string) string {
 	case "1w", "1week":
 		return "W1"
 	case "1month", "1mo", "1mth", "1M":
-		return "MO1"
+		return "MN"
 	default:
 		return ""
 	}
@@ -513,10 +589,14 @@ func (c *Config) ProviderSaveDir(provider string) string {
 	switch provider {
 	case "binance":
 		return filepath.Join(c.Data.Dir, "Binance")
+	case "binanceflat":
+		return filepath.Join(c.Data.Dir, "BinanceFlat")
 	case "twelvedata":
 		return filepath.Join(c.Data.Dir, "TwelveData")
 	case "vci":
 		return filepath.Join(c.Data.Dir, "VCI")
+	case "okx":
+		return filepath.Join(c.Data.Dir, "OKX")
 	default: // massive / polygon
 		return filepath.Join(c.Data.Dir, "Polygon")
 	}
@@ -527,8 +607,25 @@ func (c *Config) ProgressPath() string {
 	return c.ProviderProgressPath("massive")
 }
 
-// ProviderProgressPath returns the progress file path for a given provider.
+// ProviderProgressPath returns the per-ticker last-success checkpoint file for a provider.
+// This file is used to resolve the next crawl start (lastSuccess + 1 day).
 func (c *Config) ProviderProgressPath(provider string) string {
+	return filepath.Join(c.ProviderSaveDir(provider), ".lastrun.success.json")
+}
+
+// ProviderFrameProgressPath returns a frame-scoped progress file so that
+// multiple frames of the same provider (e.g. D1 and M1) do not race on a
+// shared file. Falls back to ProviderProgressPath when frame is empty.
+func (c *Config) ProviderFrameProgressPath(provider, frame string) string {
+	if frame == "" {
+		return c.ProviderProgressPath(provider)
+	}
+	return filepath.Join(c.ProviderSaveDir(provider), strings.ToUpper(frame), ".lastrun.success.json")
+}
+
+// ProviderLastDayPath returns the provider-level last trading day snapshot.
+// This is market metadata (not per-ticker success progress).
+func (c *Config) ProviderLastDayPath(provider string) string {
 	return filepath.Join(c.ProviderSaveDir(provider), ".lastday.json")
 }
 

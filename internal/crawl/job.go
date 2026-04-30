@@ -6,13 +6,14 @@ import (
 )
 
 // BuildTargets stamps a flat ticker list into typed Job targets,
-// filling Source, Class, and SaveDir for each entry.
-func BuildTargets(tickers []string, saveDir, source string, class AssetClass) []Job {
+// filling Source, Class, Frame, and SaveDir for each entry.
+func BuildTargets(tickers []string, saveDir, source, frame string, class AssetClass) []Job {
 	out := make([]Job, 0, len(tickers))
 	for _, t := range tickers {
 		out = append(out, Job{
 			Source:  source,
 			Class:   class,
+			Frame:   frame,
 			Ticker:  t,
 			SaveDir: saveDir,
 		})
@@ -26,16 +27,16 @@ func BuildTargets(tickers []string, saveDir, source string, class AssetClass) []
 // asOf is the last calendar date to include (e.g. last trading day or yesterday).
 //
 // Rules:
-//   - no progress entry → backfill backfillYears of history ending asOf
-//   - has entry         → fetch from lastday+1 to asOf
-//   - already up to date → skip=true
-//
-// Chunk splitting and rate-limiting are handled inside CrawlBarsWithKey.
-func resolveJobRange(target Job, m map[string]string, asOf time.Time, backfillYears int) (from, to time.Time, skip bool) {
+//   - has entry              → fetch from lastSuccess+1 to asOf
+//   - no entry, fromDate set → use fromDate as start
+//   - no entry, fromDate zero → from = zero time; crawler self-resolves
+//     (e.g. via EarliestAvailable / backward pagination until empty)
+//   - already up to date     → skip=true
+func resolveJobRange(target Job, m map[string]string, asOf time.Time, fromDate time.Time) (from, to time.Time, skip bool) {
 	asOf = date(asOf)
 	endOfAsOf := asOf.Add(24*time.Hour - time.Millisecond)
 
-	key := progressKey(target.Source, target.Class, target.Ticker)
+	key := progressKey(target.Source, target.Class, target.Frame, target.Ticker)
 	last, ok := m[key]
 	if !ok {
 		if legacy, legacyOk := m[target.Ticker]; legacyOk {
@@ -45,7 +46,10 @@ func resolveJobRange(target Job, m map[string]string, asOf time.Time, backfillYe
 	}
 
 	if !ok {
-		from = time.Date(asOf.Year()-backfillYears, asOf.Month(), asOf.Day(), 0, 0, 0, 0, time.UTC)
+		if !fromDate.IsZero() {
+			from = date(fromDate)
+		}
+		// fromDate zero → from stays zero; crawler resolves.
 		return from, endOfAsOf, false
 	}
 

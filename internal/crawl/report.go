@@ -15,20 +15,9 @@ type failedEntry struct {
 	Reason    string `json:"reason"`
 }
 
-func writeRunReport(saveBaseDir string, successList []string, failedList []failedEntry) error {
+func writeRunReport(saveBaseDir string, failedList []failedEntry) error {
 	if err := os.MkdirAll(saveBaseDir, 0755); err != nil {
 		return err
-	}
-	if len(successList) > 0 {
-		p := filepath.Join(saveBaseDir, ".lastrun.success.json")
-		data, err := json.MarshalIndent(successList, "", "  ")
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(p, data, 0644); err != nil {
-			return err
-		}
-		slog.Info("report wrote success", "path", p, "tickers", len(successList))
 	}
 	if len(failedList) > 0 {
 		p := filepath.Join(saveBaseDir, ".lastrun.failed.json")

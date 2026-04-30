@@ -5,7 +5,6 @@ import (
 	"time"
 )
 
-
 // AssetClass identifies the type of financial instrument.
 type AssetClass string
 
@@ -25,6 +24,7 @@ const (
 type Job struct {
 	Source  string
 	Class   AssetClass
+	Frame   string // e.g. M1, D1 — required to scope progress per timeframe
 	Ticker  string
 	From    time.Time
 	To      time.Time

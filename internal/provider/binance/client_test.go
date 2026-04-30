@@ -129,26 +129,33 @@ func TestGetKlines_HTTPError(t *testing.T) {
 // ── FetchBars chunking ────────────────────────────────────────────────────
 
 func TestFetchBars_ChunksCorrectly(t *testing.T) {
-	callCount := 0
+	klineCallCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
 		w.Header().Set("Content-Type", "application/json")
-		// Return empty slice to stop chunking after first call
-		w.Write([]byte("[]"))
+		switch r.URL.Path {
+		case exchangeInfoAPI:
+			// onboarding metadata lookup (new pre-step before kline chunking)
+			w.Write([]byte(`{"symbols":[{"symbol":"BTCUSDT","onboardDate":1672531200000}]}`))
+		case klinesEndpoint:
+			klineCallCount++
+			// Always empty: crawler now retries on empty mid-flow as a defense
+			// against silent throttling, so we expect 1 initial + 5 retries.
+			w.Write([]byte("[]"))
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer srv.Close()
 
 	c, _ := NewCrawler(srv.URL, "/tmp", "1m", nil)
 	from := time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)
-	// 1m interval: 1000 bars per chunk = 1000 minutes per chunk
-	// Request 2001 minutes → should trigger 3 chunks (but returns empty → stops at 1)
 	to := from.Add(2001 * time.Minute)
 	_, err := c.FetchBars("BTCUSDT", "", from, to)
 	if err != nil {
 		t.Fatalf("FetchBars: %v", err)
 	}
-	// First chunk returns empty → loop breaks, 1 call expected
-	if callCount != 1 {
-		t.Errorf("expected 1 HTTP call (empty response stops loop), got %d", callCount)
+	// 1 initial + 5 retries on empty = 6 calls before giving up.
+	if klineCallCount != 6 {
+		t.Errorf("expected 6 kline HTTP calls (1 + 5 empty retries), got %d", klineCallCount)
 	}
 }

@@ -42,18 +42,25 @@ func NewCrawler(baseURL, saveDir, timeFrame string, ps saver.PacketSaver) (*Craw
 
 // FetchBars retrieves bars for symbol over [from, to]. apiKey is ignored (no key required).
 // Chunks requests to avoid 502; for ONE_MINUTE uses at most MaxBarsPerRequest per call.
+//
+// `from` may be the zero time (full-history mode); we treat that as "fetch as
+// many bars as the API will give back" — backward pagination breaks naturally
+// when VCI returns an empty page or stops advancing.
 func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, error) {
 	var all []model.Bar
 	toSec := to.Unix()
-	if to.Before(from) {
+	if !from.IsZero() && to.Before(from) {
 		return nil, fmt.Errorf("vci: from must be before to")
 	}
 
 	switch c.TimeFrame {
 	case TimeFrameDay:
-		days := int(to.Sub(from).Hours()/24) + 1
-		if days > 5000 {
-			days = 5000 // doc: ~5k bars max for daily
+		days := 5000 // doc: ~5k bars max for daily; use the cap when from is zero
+		if !from.IsZero() {
+			days = int(to.Sub(from).Hours()/24) + 1
+			if days > 5000 {
+				days = 5000
+			}
 		}
 		if days <= 0 {
 			return nil, nil
@@ -89,7 +96,7 @@ func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, 
 				break
 			}
 			curTo = oldestTs/1000 - 1
-			if curTo < from.Unix() {
+			if !from.IsZero() && curTo < from.Unix() {
 				break
 			}
 		}
@@ -105,8 +112,11 @@ func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, 
 }
 
 func filterBarsInRange(bars []model.Bar, from, to time.Time) []model.Bar {
-	fromMs := from.UnixMilli()
 	toMs := to.UnixMilli()
+	var fromMs int64
+	if !from.IsZero() {
+		fromMs = from.UnixMilli()
+	}
 	var out []model.Bar
 	for _, b := range bars {
 		if b.Timestamp >= fromMs && b.Timestamp <= toMs {

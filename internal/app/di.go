@@ -7,6 +7,8 @@ import (
 
 	"hist-data/internal/crawl"
 	"hist-data/internal/provider/binance"
+	"hist-data/internal/provider/binanceflat"
+	"hist-data/internal/provider/okx"
 	"hist-data/internal/provider/polygon"
 	"hist-data/internal/provider/twelvedata"
 	"hist-data/internal/provider/vci"
@@ -43,10 +45,14 @@ func buildProviders(cfg *Config, ps saver.PacketSaver) (map[string]crawl.BarFetc
 			fetcher, err = buildMassiveFetcher(cfg, a, ps)
 		case "binance":
 			fetcher, err = buildBinanceFetcher(cfg, a, ps)
+		case "binanceflat":
+			fetcher, err = buildBinanceFlatFetcher(cfg, a, ps)
 		case "twelvedata":
 			fetcher, err = buildTwelveDataFetcher(cfg, a, ps)
 		case "vci":
 			fetcher, err = buildVCIFetcher(cfg, a, ps)
+		case "okx":
+			fetcher, err = buildOKXFetcher(cfg, a, ps)
 		default:
 			return nil, fmt.Errorf("unknown provider %q for asset %q", prov, a.Class)
 		}
@@ -86,6 +92,19 @@ func buildBinanceFetcher(cfg *Config, a resolvedAsset, ps saver.PacketSaver) (cr
 	return crawler, nil
 }
 
+func buildBinanceFlatFetcher(cfg *Config, a resolvedAsset, ps saver.PacketSaver) (crawl.BarFetcher, error) {
+	frame, err := providerFrameSpec("binance", a.Frame.Name)
+	if err != nil {
+		return nil, err
+	}
+	crawler, err := binanceflat.NewCrawler(cfg.BinanceFlat.BaseURL, cfg.ProviderSaveDir("binanceflat"), frame.ProviderInterval, ps)
+	if err != nil {
+		return nil, err
+	}
+	crawler.FrameLabel = a.Frame.Name
+	return crawler, nil
+}
+
 func buildTwelveDataFetcher(cfg *Config, a resolvedAsset, ps saver.PacketSaver) (crawl.BarFetcher, error) {
 	frame, err := providerFrameSpec("twelvedata", a.Frame.Name)
 	if err != nil {
@@ -117,6 +136,20 @@ func buildVCIFetcher(cfg *Config, a resolvedAsset, ps saver.PacketSaver) (crawl.
 		c.ChunkDelay = 500 * time.Millisecond
 	}
 	return c, nil
+}
+
+func buildOKXFetcher(cfg *Config, a resolvedAsset, ps saver.PacketSaver) (crawl.BarFetcher, error) {
+	frame, err := providerFrameSpec("okx", a.Frame.Name)
+	if err != nil {
+		return nil, err
+	}
+	crawler, err := okx.NewCrawler(cfg.OKX.BaseURL, cfg.ProviderSaveDir("okx"), frame.ProviderInterval, ps)
+	if err != nil {
+		return nil, err
+	}
+	crawler.FrameLabel = a.Frame.Name
+	crawler.SinkFrames = a.SinkFrames
+	return crawler, nil
 }
 
 // AssetKey returns the unique pipeline key for a resolved asset: "provider:class:frame".
@@ -169,7 +202,7 @@ func providerFrameSpec(provider, frame string) (providerFrame, error) {
 			return providerFrame{MassiveTimespan: "day", MassiveMultiplier: 1}, nil
 		case "W1":
 			return providerFrame{MassiveTimespan: "week", MassiveMultiplier: 1}, nil
-		case "MO1":
+		case "MN":
 			return providerFrame{MassiveTimespan: "month", MassiveMultiplier: 1}, nil
 		}
 	case "binance":
@@ -190,7 +223,7 @@ func providerFrameSpec(provider, frame string) (providerFrame, error) {
 			return providerFrame{ProviderInterval: "1d"}, nil
 		case "W1":
 			return providerFrame{ProviderInterval: "1w"}, nil
-		case "MO1":
+		case "MN":
 			return providerFrame{ProviderInterval: "1M"}, nil
 		}
 	case "twelvedata":
@@ -211,7 +244,7 @@ func providerFrameSpec(provider, frame string) (providerFrame, error) {
 			return providerFrame{ProviderInterval: "1day"}, nil
 		case "W1":
 			return providerFrame{ProviderInterval: "1week"}, nil
-		case "MO1":
+		case "MN":
 			return providerFrame{ProviderInterval: "1month"}, nil
 		}
 	case "vci":
@@ -222,6 +255,26 @@ func providerFrameSpec(provider, frame string) (providerFrame, error) {
 			return providerFrame{ProviderInterval: vci.TimeFrameHour}, nil
 		case "D1":
 			return providerFrame{ProviderInterval: vci.TimeFrameDay}, nil
+		}
+	case "okx":
+		// OKX bar strings: minute=lowercase m, hour/day/week/month=uppercase
+		switch frame {
+		case "M1":
+			return providerFrame{ProviderInterval: "1m"}, nil
+		case "M5":
+			return providerFrame{ProviderInterval: "5m"}, nil
+		case "M15":
+			return providerFrame{ProviderInterval: "15m"}, nil
+		case "M30":
+			return providerFrame{ProviderInterval: "30m"}, nil
+		case "H1":
+			return providerFrame{ProviderInterval: "1H"}, nil
+		case "H4":
+			return providerFrame{ProviderInterval: "4H"}, nil
+		case "D1":
+			return providerFrame{ProviderInterval: "1D"}, nil
+		case "W1":
+			return providerFrame{ProviderInterval: "1W"}, nil
 		}
 	}
 

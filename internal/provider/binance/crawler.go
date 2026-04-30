@@ -57,16 +57,41 @@ func NewCrawler(baseURL, saveDir, interval string, ps saver.PacketSaver) (*Crawl
 // FetchBars retrieves complete OHLCV bars for symbol over [from, to].
 // apiKey is ignored — Binance klines are public.
 // Automatically chunks requests at 1000 bars (Binance API limit).
+//
+// When `from` is the zero time, the caller is asking for full history
+// (config backfillYears=0). We resolve the start via exchangeInfo's
+// onboardDate; if that fails we return an error rather than silently fetching
+// nothing — the caller can set a non-zero backfillYears as a workaround.
+//
+// When `from` is non-zero but precedes the symbol listing, we still clamp up to
+// onboardDate so we don't burn requests on pre-listing periods.
 func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, error) {
 	barDur, ok := intervalDuration[c.Interval]
 	if !ok {
 		return nil, fmt.Errorf("unknown interval %q", c.Interval)
+	}
+	if from.IsZero() {
+		listedAt, err := c.client.GetSymbolStartTime(symbol)
+		if err != nil {
+			return nil, fmt.Errorf("binance %s: cannot resolve start time (set backfillYears > 0 to override): %w", symbol, err)
+		}
+		if listedAt.IsZero() {
+			return nil, fmt.Errorf("binance %s: exchangeInfo returned no onboardDate (set backfillYears > 0 to override)", symbol)
+		}
+		from = listedAt
+	} else if listedAt, err := c.client.GetSymbolStartTime(symbol); err == nil && !listedAt.IsZero() && from.Before(listedAt) {
+		from = listedAt
+	}
+	if !from.Before(to) {
+		return nil, nil
 	}
 
 	chunkDur := barDur * 1000 // 1000 bars per request
 	var all []model.Bar
 
 	cur := from
+	emptyStreak := 0
+	const maxEmptyRetries = 5
 	for cur.Before(to) {
 		end := cur.Add(chunkDur)
 		if end.After(to) {
@@ -77,11 +102,25 @@ func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, 
 		if err != nil {
 			return nil, fmt.Errorf("fetch %s [%s, %s]: %w", symbol, cur.Format(time.RFC3339), end.Format(time.RFC3339), err)
 		}
-		all = append(all, bars...)
 
 		if len(bars) == 0 {
-			break // no more data in range
+			emptyStreak++
+			if emptyStreak > maxEmptyRetries {
+				// Real end of history (or persistent throttle): stop here.
+				break
+			}
+			// Suspect silent throttle / regional empty 200. Back off and retry
+			// the same window before giving up.
+			wait := time.Duration(1<<emptyStreak) * time.Second
+			if wait > 16*time.Second {
+				wait = 16 * time.Second
+			}
+			time.Sleep(wait)
+			continue
 		}
+		emptyStreak = 0
+
+		all = append(all, bars...)
 		// Advance past the last bar's timestamp
 		lastTs := time.UnixMilli(bars[len(bars)-1].Timestamp)
 		cur = lastTs.Add(barDur)
@@ -98,4 +137,9 @@ func (c *Crawler) SaveBars(dir, symbol string, from, to time.Time, bars []model.
 		frameLabel = strings.ToUpper(c.Interval)
 	}
 	saver.SaveFrameSet("binance", frameLabel, c.SinkFrames, dir, symbol, from, to, bars, c.PacketSaver)
+}
+
+// EarliestAvailable returns the first known onboard time for symbol.
+func (c *Crawler) EarliestAvailable(symbol string) (time.Time, error) {
+	return c.client.GetSymbolStartTime(symbol)
 }

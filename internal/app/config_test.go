@@ -1,6 +1,7 @@
 package app
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -50,6 +51,96 @@ func TestStringOrSliceHookSupportsLegacyScalarAndSlice(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsPolygonKeysFromEnv(t *testing.T) {
+	tmp := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir temp: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(oldwd); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	}()
+
+	restoreSingle := unsetEnv("POLYGON_API_KEY")
+	defer restoreSingle()
+	restoreMulti := setEnv("POLYGON_API_KEYS", "key1,key2")
+	defer restoreMulti()
+
+	config := []byte(`
+data:
+  dir: data
+  format: parquet
+assets:
+  - class: stocks
+    provider: massive
+    enabled: true
+    frames:
+      - name: M1
+        backfillYears: 1
+`)
+	if err := os.WriteFile("config.yaml", config, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Massive.Keys, []string{"key1", "key2"}) {
+		t.Fatalf("keys = %v, want [key1 key2]", cfg.Massive.Keys)
+	}
+}
+
+func setEnv(key, value string) func() {
+	old, ok := os.LookupEnv(key)
+	_ = os.Setenv(key, value)
+	return func() {
+		if ok {
+			_ = os.Setenv(key, old)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	}
+}
+
+func TestResolveDataDirAnchorsRelativeToConfigDir(t *testing.T) {
+	tmp := t.TempDir()
+	cfgFile := filepath.Join(tmp, "config.yaml")
+
+	got := resolveDataDir("data", cfgFile)
+	want := filepath.Join(tmp, "data")
+	if got != want {
+		t.Fatalf("relative dir: got %q, want %q", got, want)
+	}
+
+	got = resolveDataDir("", cfgFile)
+	if got != want {
+		t.Fatalf("empty dir: got %q, want %q", got, want)
+	}
+
+	abs := filepath.Join(tmp, "external", "store")
+	if got := resolveDataDir(abs, cfgFile); got != abs {
+		t.Fatalf("absolute dir: got %q, want %q", got, abs)
+	}
+}
+
+func unsetEnv(key string) func() {
+	old, ok := os.LookupEnv(key)
+	_ = os.Unsetenv(key)
+	return func() {
+		if ok {
+			_ = os.Setenv(key, old)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	}
+}
+
 func TestExpandedAssetsCreatesOnePipelinePerFrame(t *testing.T) {
 	cfg := &Config{
 		Assets: []AssetConfig{
@@ -58,8 +149,8 @@ func TestExpandedAssetsCreatesOnePipelinePerFrame(t *testing.T) {
 				Provider: "binance",
 				Enabled:  true,
 				Frames: []FrameSpec{
-					{Name: "M1", BackfillYears: 3},
-					{Name: "D1", BackfillYears: 25},
+					{Name: "M1", FromYear: 2022},
+					{Name: "D1", FromYear: 2000},
 				},
 				Tickers: []string{"BTCUSDT"},
 			},
@@ -76,8 +167,8 @@ func TestExpandedAssetsCreatesOnePipelinePerFrame(t *testing.T) {
 	if !reflect.DeepEqual(gotKeys, wantKeys) {
 		t.Fatalf("keys = %v, want %v", gotKeys, wantKeys)
 	}
-	if assets[1].Frame.BackfillYears != 25 {
-		t.Fatalf("D1 backfill = %d, want 25", assets[1].Frame.BackfillYears)
+	if assets[1].Frame.FromYear != 2000 {
+		t.Fatalf("D1 fromYear = %d, want 2000", assets[1].Frame.FromYear)
 	}
 }
 
@@ -108,8 +199,29 @@ func TestProviderFrameSpecRejectsUnsupportedProviderFramePair(t *testing.T) {
 	}
 }
 
-func TestValidateConfigRequiresDataLevelBackfill(t *testing.T) {
+func TestValidateConfigRejectsNegativeFromYear(t *testing.T) {
 	cfg := &Config{}
+	cfg.Binance.Workers = 1
+	cfg.Assets = []AssetConfig{
+		{
+			Class:    "crypto",
+			Provider: "binance",
+			Enabled:  true,
+			Frames: []FrameSpec{
+				{Name: "M1", FromYear: -1},
+			},
+			Tickers: []string{"BTCUSDT"},
+		},
+	}
+
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("expected fromYear validation error for negative value")
+	}
+}
+
+func TestValidateConfigAcceptsZeroBackfillAsFullHistory(t *testing.T) {
+	cfg := &Config{}
+	cfg.Data.Format = "parquet"
 	cfg.Binance.Workers = 1
 	cfg.Assets = []AssetConfig{
 		{
@@ -123,8 +235,8 @@ func TestValidateConfigRequiresDataLevelBackfill(t *testing.T) {
 		},
 	}
 
-	if err := validateConfig(cfg); err == nil {
-		t.Fatal("expected backfillYears validation error")
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("expected zero backfillYears to be accepted as full history, got %v", err)
 	}
 }
 
@@ -133,12 +245,11 @@ func TestResolveTargetsByProviderUsesFrameFirstSaveDir(t *testing.T) {
 	cfg.Data.Dir = "data"
 	cfg.Assets = []AssetConfig{
 		{
-			Class:         "crypto",
-			Provider:      "binance",
-			Enabled:       true,
-			BackfillYears: 4,
+			Class:    "crypto",
+			Provider: "binance",
+			Enabled:  true,
 			Frames: []FrameSpec{
-				{Name: "M1", BackfillYears: 4, SinkFrames: []string{"M1", "M5"}},
+				{Name: "M1", FromYear: 2021, SinkFrames: []string{"M1", "M5"}},
 			},
 			Tickers: []string{"BTCUSDT"},
 		},
@@ -164,13 +275,12 @@ func TestExpandedAssetsSinkFramesPerFrame(t *testing.T) {
 	cfg := &Config{
 		Assets: []AssetConfig{
 			{
-				Class:         "vn",
-				Provider:      "vci",
-				Enabled:       true,
-				BackfillYears: 3,
+				Class:    "vn",
+				Provider: "vci",
+				Enabled:  true,
 				Frames: []FrameSpec{
-					{Name: "M1", BackfillYears: 3, SinkFrames: []string{"M1", "M5", "H1"}},
-					{Name: "D1", BackfillYears: 25},
+					{Name: "M1", FromYear: 2022, SinkFrames: []string{"M1", "M5", "H1"}},
+					{Name: "D1", FromYear: 2000},
 				},
 			},
 		},

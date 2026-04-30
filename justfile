@@ -1,14 +1,26 @@
+# Tự nạp .env vào env của recipe (giúp `just run` thấy POLYGON_API_KEYS, v.v.)
+set dotenv-load := true
+
 # Chạy `just` không đối số → in danh sách recipes
 default:
     @just --list
 
 # Build Go binary locally
 build:
-    go build -o main ./cmd/us-data/
+    go build -o main ./cmd/hist-data/
 
-# Run locally
+# Run locally (uses `go run` — kill/Ctrl+C có thể để grandchild chạy tiếp tới hết cycle)
 run:
-    go run ./cmd/us-data/
+    go run ./cmd/hist-data/
+
+# Run locally — build rồi exec luôn binary, kill/Ctrl+C đi thẳng vào 1 PID duy nhất
+start: build
+    exec ./main
+
+# Diệt mọi tiến trình hist-data đang còn (bao gồm grandchild orphan của `go run`)
+stop:
+    -pkill -f '/exe/hist-data$|^./main$|cmd/hist-data'
+    -pkill -f 'go run.*cmd/hist-data'
 
 # Docker: build images
 docker-build:
