@@ -14,13 +14,18 @@ import (
 )
 
 const (
-	defaultBaseURL       = "https://www.okx.com"
-	historyCandlesPath   = "/api/v5/market/history-candles"
-	recentCandlesPath    = "/api/v5/market/candles"
-	instrumentsPath      = "/api/v5/public/instruments"
-	maxHistoryPerReq     = 100                 // OKX history-candles limit
-	maxRecentPerReq      = 300                 // OKX candles limit
-	recentCutoffDuration = 90 * 24 * time.Hour // history-candles covers >90d, candles covers recent
+	defaultBaseURL     = "https://www.okx.com"
+	historyCandlesPath = "/api/v5/market/history-candles"
+	recentCandlesPath  = "/api/v5/market/candles"
+	instrumentsPath    = "/api/v5/public/instruments"
+	maxHistoryPerReq   = 100 // OKX history-candles limit
+	maxRecentPerReq    = 300 // OKX candles limit
+
+	// recentCutoffDuration controls the endpoint switch.
+	// OKX `candles` has a hard cap of 1440 entries total (= 24 h for 1m bars).
+	// Using a 2-day window ensures `candles` only covers unconfirmed/very recent
+	// bars; `history-candles` handles all bulk backfill.
+	recentCutoffDuration = 2 * 24 * time.Hour
 )
 
 type okxResponse struct {
@@ -92,22 +97,19 @@ func (c *Client) GetListTime(instId string) (time.Time, error) {
 
 // GetCandles fetches up to limit OHLCV bars for instId with timestamp < afterMs.
 // Returns bars in descending order (newest first) — caller reverses for ascending.
-// Uses history-candles for data older than recentCutoffDuration (>90d),
-// falls back to candles endpoint for recent data.
+// Starts with the candles (recent) endpoint; switches to history-candles when
+// candles returns empty (it has a hard cap of ~1440 entries regardless of cursor).
 //
 // Note on OKX semantics (counter-intuitive!):
 //   - `after=ts`  → returns bars OLDER than ts (use this for backward pagination)
 //   - `before=ts` → returns bars NEWER than ts (forward pagination)
 //
-// We page backward, so the cursor is passed as `after`.
-//
-// Transient HTTP 429 (Too Many Requests) and 5xx are retried with exponential
-// backoff so a temporary rate-limit burst does not abort an in-flight backfill.
-func (c *Client) GetCandles(instId, bar string, afterMs int64) ([]model.Bar, error) {
+// Transient HTTP 429 and 5xx are retried with exponential backoff.
+func (c *Client) GetCandles(instId, bar string, afterMs int64, useHistory bool) ([]model.Bar, error) {
 	const maxAttempts = 5
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		bars, err := c.getCandlesOnce(instId, bar, afterMs)
+		bars, err := c.getCandlesOnce(instId, bar, afterMs, useHistory)
 		if err == nil {
 			return bars, nil
 		}
@@ -115,7 +117,6 @@ func (c *Client) GetCandles(instId, bar string, afterMs int64) ([]model.Bar, err
 			return nil, err
 		}
 		lastErr = err
-		// Exponential backoff capped at 8s: 0.5s, 1s, 2s, 4s, 8s.
 		wait := time.Duration(500*(1<<attempt)) * time.Millisecond
 		if wait > 8*time.Second {
 			wait = 8 * time.Second
@@ -125,12 +126,12 @@ func (c *Client) GetCandles(instId, bar string, afterMs int64) ([]model.Bar, err
 	return nil, fmt.Errorf("okx candles: exhausted retries: %w", lastErr)
 }
 
-func (c *Client) getCandlesOnce(instId, bar string, afterMs int64) ([]model.Bar, error) {
+func (c *Client) getCandlesOnce(instId, bar string, afterMs int64, useHistory bool) ([]model.Bar, error) {
 	cutoff := time.Now().Add(-recentCutoffDuration).UnixMilli()
 
 	endpoint := historyCandlesPath
 	limit := maxHistoryPerReq
-	if afterMs > cutoff {
+	if !useHistory && afterMs > cutoff {
 		endpoint = recentCandlesPath
 		limit = maxRecentPerReq
 	}

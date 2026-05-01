@@ -82,22 +82,30 @@ func (c *Crawler) FetchBars(instId, _ string, from, to time.Time) ([]model.Bar, 
 	toMs := to.UnixMilli()
 
 	// OKX returns candles newest-first; paginate backward using `after` cursor.
+	// Start with the recent `candles` endpoint; when it returns empty (its 1440-
+	// entry hard cap is exhausted) switch transparently to `history-candles`.
 	var collected []model.Bar
 	cursor := toMs + 1 // exclusive upper bound
+	useHistory := false
 	emptyStreak := 0
 	const maxEmptyRetries = 5
 
 	for {
-		batch, err := c.client.GetCandles(instId, c.Interval, cursor)
+		batch, err := c.client.GetCandles(instId, c.Interval, cursor, useHistory)
 		if err != nil {
 			return nil, fmt.Errorf("fetch %s [%s, %s]: %w",
 				instId, from.Format(time.RFC3339), to.Format(time.RFC3339), err)
 		}
 
 		if len(batch) == 0 {
+			// If candles endpoint is exhausted, switch to history-candles once.
+			if !useHistory {
+				useHistory = true
+				continue
+			}
 			emptyStreak++
 			if emptyStreak > maxEmptyRetries {
-				break // real end (before listTime) or persistent throttle
+				break // real end of available data
 			}
 			wait := time.Duration(1<<emptyStreak) * time.Second
 			if wait > 16*time.Second {
@@ -120,10 +128,9 @@ func (c *Crawler) FetchBars(instId, _ string, from, to time.Time) ([]model.Bar, 
 			break
 		}
 		cursor = oldest // next page: candles strictly older than this
-		// OKX public budget ≈ 20 req/s per IP. With multiple workers running in
-		// parallel we must stay well under that — 250ms per request keeps each
-		// worker at ~4 req/s, so 3 workers ≈ 12 req/s aggregate.
-		time.Sleep(250 * time.Millisecond)
+		// OKX public limit: 40 req/2 s (20 req/s) per IP.
+		// 50 ms per request = 20 req/s — saturates the budget with 1 worker.
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	// Reverse to ascending order

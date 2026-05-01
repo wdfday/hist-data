@@ -205,7 +205,7 @@ func providerFrameSpec(provider, frame string) (providerFrame, error) {
 		case "MN":
 			return providerFrame{MassiveTimespan: "month", MassiveMultiplier: 1}, nil
 		}
-	case "binance":
+	case "binance", "binanceflat":
 		switch frame {
 		case "M1":
 			return providerFrame{ProviderInterval: "1m"}, nil

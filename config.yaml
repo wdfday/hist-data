@@ -35,7 +35,7 @@ binanceflat:
 okx:
   baseUrl: "https://www.okx.com"
   workers: 1
-  rateLimit: 4          # public endpoints: 40 req/2s; no delay needed
+  rateLimit: 0          # inter-symbol delay; per-request throttle (50ms) handled inside crawler
   schedule:
     runHour: 0          # UTC midnight — crypto 24/7, run at day rollover
     runMinute: 45       # offset from Binance (00:30) to avoid concurrent I/O
@@ -97,7 +97,7 @@ assets:
         from: "2024-05"
       - name: D1
         from: "2024-01"     # Polygon free tier ≈ 5y
-    enabled: true
+    enabled: false
     groups:
       #      - sp500           # ~503 stocks, free (GitHub CSV)
       - nasdaq100       # ~101 stocks, free (Wikipedia)
@@ -116,13 +116,29 @@ assets:
       - BTCUSDT
     validate: false
 
-  # ── Crypto via BinanceFlat CDN — EOD only ────────────────────────────────
+  # ── Crypto via BinanceFlat CDN — full history, all timeframes ───────────
+  # Binance Vision provides pre-built ZIPs for every interval — no sinkFrames
+  # needed; each frame is fetched directly and has canonical Binance data.
+  # Use this as the M1+ history source for all cross-listed symbols (BNB, BTC…)
+  # even when live-trading on OKX; price correlation is tight enough for M1 strategy.
   - class: crypto
     provider: binanceflat
     frames:
+      - name: M1
+        from: ""            # full history from 2017 (pre-listing months skipped via 404)
+      - name: M5
+        from: ""
+      - name: M15
+        from: ""
+      - name: M30
+        from: ""
+      - name: H1
+        from: ""
+      - name: H4
+        from: ""
       - name: D1
-        from: ""            # empty = full history (resolved via exchangeInfo onboardDate)
-    enabled: false
+        from: ""
+    enabled: true
     groups: []
     tickers:
       - BTCUSDT
@@ -137,13 +153,13 @@ assets:
       - MATICUSDT
     validate: false
 
-  # ── Crypto via OKX — EOD only ────────────────────────────────────────────
+  # ── Crypto via OKX — D1 only (M1 history from BinanceFlat above) ─────────
   - class: crypto
     provider: okx
     frames:
       - name: D1
-        from: ""            # empty = full history (resolved via /public/instruments listTime)
-    enabled: false
+        from: ""            # full history (resolved via /public/instruments listTime)
+    enabled: true
     groups: []
     tickers:
       - BTC-USDT
@@ -185,7 +201,7 @@ assets:
       - name: M1
         sinkFrames: [M1, M5, M15, M30, H1, H4]
         from: "2023-01"     # VCI minute history ≈ 1y
-    enabled: true
+    enabled: false
     groups:
       - VN30
       # - VN100

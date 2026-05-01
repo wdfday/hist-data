@@ -45,10 +45,28 @@ func NewCrawler(baseURL, saveDir, interval string, ps saver.PacketSaver) (*Crawl
 // `from` may be the zero time for full-history mode; we walk from 2017-01-01
 // (a few months before BTCUSDT genesis) and rely on 404 handling to skip
 // pre-listing months.
+//
+// The range is always rewound to the start of the previous calendar month so
+// that data previously accumulated from daily ZIPs is replaced by the
+// official monthly ZIP on the first run after a month closes.
 func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, error) {
 	if from.IsZero() {
 		from = time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC)
 	}
+
+	now := time.Now().UTC()
+
+	// Rewind to start of the previous month only when `from` is behind the
+	// current month — meaning this is the first run of a new month.
+	// This replaces daily-accumulated data for the just-closed month with the
+	// canonical monthly ZIP that Binance publishes after month-end.
+	if from.Year() != now.Year() || from.Month() != now.Month() {
+		prevMonthStart := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, time.UTC)
+		if from.After(prevMonthStart) {
+			from = prevMonthStart
+		}
+	}
+
 	if !from.Before(to) {
 		return nil, nil
 	}
@@ -56,7 +74,6 @@ func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, 
 	fromMs := from.UnixMilli()
 	toMs := to.UnixMilli()
 
-	now := time.Now().UTC()
 	currentMonthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 
 	var all []model.Bar

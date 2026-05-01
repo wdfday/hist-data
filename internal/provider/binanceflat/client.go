@@ -6,13 +6,16 @@ package binanceflat
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"hist-data/internal/model"
@@ -74,6 +77,10 @@ func (c *Client) fetchZip(url string) ([]model.Bar, error) {
 		return nil, fmt.Errorf("binanceflat read zip: %w", err)
 	}
 
+	if err := c.verifyChecksum(url, buf); err != nil {
+		return nil, err
+	}
+
 	zr, err := zip.NewReader(bytes.NewReader(buf), int64(len(buf)))
 	if err != nil {
 		return nil, fmt.Errorf("binanceflat zip open: %w", err)
@@ -89,6 +96,42 @@ func (c *Client) fetchZip(url string) ([]model.Bar, error) {
 	defer f.Close()
 
 	return parseCSV(f)
+}
+
+// verifyChecksum fetches <url>.CHECKSUM and compares the SHA256 of buf.
+// If the checksum file returns 404 the check is skipped (older files may not
+// have one). Any other fetch or mismatch error is returned as a hard error.
+func (c *Client) verifyChecksum(zipURL string, buf []byte) error {
+	csResp, err := c.httpClient.Get(zipURL + ".CHECKSUM")
+	if err != nil {
+		return fmt.Errorf("binanceflat checksum fetch: %w", err)
+	}
+	defer csResp.Body.Close()
+
+	if csResp.StatusCode == http.StatusNotFound {
+		return nil // checksum not available; skip
+	}
+	if csResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("binanceflat checksum HTTP %d", csResp.StatusCode)
+	}
+
+	csBody, err := io.ReadAll(io.LimitReader(csResp.Body, 256))
+	if err != nil {
+		return fmt.Errorf("binanceflat checksum read: %w", err)
+	}
+
+	// Format: "sha256hash  filename\n"
+	want := strings.Fields(string(csBody))[0]
+	got := sha256Hex(buf)
+	if got != want {
+		return fmt.Errorf("binanceflat checksum mismatch: got %s want %s url=%s", got, want, zipURL)
+	}
+	return nil
+}
+
+func sha256Hex(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
 }
 
 // parseCSV parses Vision kline CSV. Columns 0..5 are openTime, O, H, L, C, V.
