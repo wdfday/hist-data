@@ -14,10 +14,12 @@ import (
 // Crawler implements crawl.BarFetcher by pulling kline ZIPs from Binance Vision.
 //
 // Strategy: walk the requested date range one calendar month at a time.
-// Closed months use the monthly aggregate ZIP (1 request per month per ticker).
-// The current/in-progress month falls back to daily ZIPs (1 request per day).
-// Missing files (HTTP 404) are skipped — they typically mean "before the
-// instrument was listed" or "T+1 publication lag for today".
+//   - Closed months: try monthly ZIP first; if 404 (not yet published, typically
+//     up to ~7 days after month-end), fall back to daily ZIPs.
+//   - Current month: always daily ZIPs (monthly ZIP doesn't exist yet).
+//
+// Month-end compaction (daily files → monthly file) is handled externally by
+// saver.CompactMonthly; no rewind or re-download of closed months here.
 type Crawler struct {
 	client        *Client
 	Interval      string // 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1mo
@@ -46,25 +48,12 @@ func NewCrawler(baseURL, saveDir, interval string, ps saver.PacketSaver) (*Crawl
 // (a few months before BTCUSDT genesis) and rely on 404 handling to skip
 // pre-listing months.
 //
-// The range is always rewound to the start of the previous calendar month so
-// that data previously accumulated from daily ZIPs is replaced by the
-// official monthly ZIP on the first run after a month closes.
+// Closed months use monthly ZIPs; the current/in-progress month falls back to
+// daily ZIPs. Month-end compaction (daily → monthly) is handled externally by
+// saver.CompactMonthly — no rewind needed here.
 func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, error) {
 	if from.IsZero() {
 		from = time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC)
-	}
-
-	now := time.Now().UTC()
-
-	// Rewind to start of the previous month only when `from` is behind the
-	// current month — meaning this is the first run of a new month.
-	// This replaces daily-accumulated data for the just-closed month with the
-	// canonical monthly ZIP that Binance publishes after month-end.
-	if from.Year() != now.Year() || from.Month() != now.Month() {
-		prevMonthStart := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, time.UTC)
-		if from.After(prevMonthStart) {
-			from = prevMonthStart
-		}
 	}
 
 	if !from.Before(to) {
@@ -74,6 +63,7 @@ func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, 
 	fromMs := from.UnixMilli()
 	toMs := to.UnixMilli()
 
+	now := time.Now().UTC()
 	currentMonthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 
 	var all []model.Bar
@@ -85,7 +75,13 @@ func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, 
 			bars, err := c.client.FetchMonthly(symbol, c.Interval, cur.Year(), cur.Month())
 			switch {
 			case errors.Is(err, ErrNotFound):
-				slog.Debug("binanceflat monthly not found", "symbol", symbol, "month", cur.Format("2006-01"))
+				// Monthly ZIP not yet published — fall back to daily ZIPs.
+				slog.Debug("binanceflat monthly not found, falling back to daily", "symbol", symbol, "month", cur.Format("2006-01"))
+				dailyBars, err2 := c.fetchDailyRange(symbol, from, to, cur, nextMonth, fromMs, toMs)
+				if err2 != nil {
+					return nil, err2
+				}
+				all = append(all, dailyBars...)
 			case err != nil:
 				return nil, fmt.Errorf("binanceflat %s %s: %w", symbol, cur.Format("2006-01"), err)
 			default:
@@ -95,23 +91,12 @@ func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, 
 			continue
 		}
 
-		// Current month: walk daily.
-		day := cur
-		if day.Before(from) {
-			day = time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC)
+		// Current month: always daily.
+		dailyBars, err := c.fetchDailyRange(symbol, from, to, cur, nextMonth, fromMs, toMs)
+		if err != nil {
+			return nil, err
 		}
-		for !day.After(to) && day.Before(nextMonth) {
-			bars, err := c.client.FetchDaily(symbol, c.Interval, day)
-			switch {
-			case errors.Is(err, ErrNotFound):
-				// today/tomorrow not yet published; skip silently.
-			case err != nil:
-				return nil, fmt.Errorf("binanceflat %s %s: %w", symbol, day.Format("2006-01-02"), err)
-			default:
-				all = appendInRange(all, bars, fromMs, toMs)
-			}
-			day = day.AddDate(0, 0, 1)
-		}
+		all = append(all, dailyBars...)
 		cur = nextMonth
 	}
 
@@ -125,6 +110,28 @@ func (c *Crawler) SaveBars(dir, symbol string, from, to time.Time, bars []model.
 		frameLabel = strings.ToUpper(c.Interval)
 	}
 	saver.SaveBars("binance", frameLabel, dir, symbol, bars, c.PacketSaver)
+}
+
+// fetchDailyRange fetches day-by-day from max(dayStart, from) up to min(to, monthEnd-1).
+func (c *Crawler) fetchDailyRange(symbol string, from, to, monthStart, monthEnd time.Time, fromMs, toMs int64) ([]model.Bar, error) {
+	day := monthStart
+	if day.Before(from) {
+		day = time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	var out []model.Bar
+	for !day.After(to) && day.Before(monthEnd) {
+		bars, err := c.client.FetchDaily(symbol, c.Interval, day)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			// not yet published (T+1 lag or future date); skip silently.
+		case err != nil:
+			return nil, fmt.Errorf("binanceflat %s %s: %w", symbol, day.Format("2006-01-02"), err)
+		default:
+			out = appendInRange(out, bars, fromMs, toMs)
+		}
+		day = day.AddDate(0, 0, 1)
+	}
+	return out, nil
 }
 
 func appendInRange(dst, src []model.Bar, fromMs, toMs int64) []model.Bar {

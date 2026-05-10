@@ -38,6 +38,13 @@ const intradayMaxRank = 6 // H4
 // SaveBars persists bars for a single frame directly (no aggregation).
 // Intraday frames (M1–H4) are partitioned by calendar month; daily and
 // higher frames are saved as a single range file.
+//
+// Partitioning strategy for intraday frames:
+//   - Closed months  → one file per month: SYMBOL_TF_YYYY-MM.parquet
+//   - Current month  → one file per day:   SYMBOL_TF_YYYY-MM-DD.parquet
+//
+// Month-end compaction (merging daily files → monthly file) is handled by
+// saver.CompactMonthly, called separately by the scheduler.
 func SaveBars(provider, frame, dir, symbol string, bars []model.Bar, packetSaver PacketSaver) {
 	if len(bars) == 0 {
 		return
@@ -59,25 +66,77 @@ func saveBarsByMonth(provider, frame, dir, symbol string, bars []model.Bar, pack
 	ext := packetSaver.Extension()
 	frameUp := strings.ToUpper(frame)
 
+	now := time.Now().UTC()
+	curYear, curMonth := now.Year(), now.Month()
+
+	// partitionKey returns "YYYY-MM-DD" for current month bars (daily partition)
+	// and "YYYY-MM" for closed month bars (monthly partition).
+	partitionKey := func(ts int64) string {
+		t := time.UnixMilli(ts).UTC()
+		if t.Year() == curYear && t.Month() == curMonth {
+			return t.Format("2006-01-02")
+		}
+		return t.Format("2006-01")
+	}
+
 	start := 0
 	for i := 1; i <= len(bars); i++ {
-		var curKey, nextKey [2]int // [year, month]
-		t := time.UnixMilli(bars[start].Timestamp).UTC()
-		curKey = [2]int{t.Year(), int(t.Month())}
-		if i < len(bars) {
-			t2 := time.UnixMilli(bars[i].Timestamp).UTC()
-			nextKey = [2]int{t2.Year(), int(t2.Month())}
+		curKey := partitionKey(bars[start].Timestamp)
+		if i < len(bars) && partitionKey(bars[i].Timestamp) == curKey {
+			continue
 		}
-		if i == len(bars) || nextKey != curKey {
-			chunk := bars[start:i]
-			name := fmt.Sprintf("%s_%s_%04d-%02d.%s", symbol, frameUp, curKey[0], curKey[1], ext)
-			path := filepath.Join(tickerDir, name)
-			if err := packetSaver.Save(chunk, path); err != nil {
-				slog.Error(provider+" save: write failed", "symbol", symbol, "path", path, "err", err)
-			} else {
-				slog.Info(provider+" save ok", "symbol", symbol, "frame", frame, "bars", len(chunk), "path", path)
+		chunk := bars[start:i]
+		name := fmt.Sprintf("%s_%s_%s.%s", symbol, frameUp, curKey, ext)
+		path := filepath.Join(tickerDir, name)
+
+		if len(curKey) == len("2006-01") {
+			// Closed month: delete any leftover daily files for this month so
+			// herald bootstrap doesn't load duplicates alongside the new monthly file.
+			deleteDailyFiles(tickerDir, symbol, frameUp, ext, curKey)
+		} else {
+			// Current month (daily key): delete stale monthly file if it exists
+			// (transition from old behaviour where current month was one big file).
+			monthlyName := fmt.Sprintf("%s_%s_%s.%s", symbol, frameUp,
+				time.UnixMilli(bars[start].Timestamp).UTC().Format("2006-01"), ext)
+			if monthlyPath := filepath.Join(tickerDir, monthlyName); monthlyPath != path {
+				_ = os.Remove(monthlyPath)
 			}
-			start = i
+		}
+
+		if err := packetSaver.Save(chunk, path); err != nil {
+			slog.Error(provider+" save: write failed", "symbol", symbol, "path", path, "err", err)
+		} else {
+			slog.Info(provider+" save ok", "symbol", symbol, "frame", frame, "bars", len(chunk), "path", path)
+		}
+		start = i
+	}
+}
+
+// deleteDailyFiles removes SYMBOL_TF_YYYY-MM-DD.parquet files for the given
+// month (ym = "YYYY-MM") from tickerDir. Called when writing the official
+// monthly file so no daily fragments remain alongside it.
+func deleteDailyFiles(tickerDir, symbol, frameUp, ext, ym string) {
+	prefix := fmt.Sprintf("%s_%s_%s-", symbol, frameUp, ym)
+	entries, err := os.ReadDir(tickerDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		if !strings.HasPrefix(n, prefix) || !strings.HasSuffix(n, "."+ext) {
+			continue
+		}
+		// Confirm it's a daily file: remainder after prefix should be "DD.ext"
+		rest := strings.TrimPrefix(n, prefix)
+		rest = strings.TrimSuffix(rest, "."+ext)
+		if len(rest) == 2 { // "DD"
+			p := filepath.Join(tickerDir, n)
+			if err := os.Remove(p); err == nil {
+				slog.Info("saver: removed daily fragment", "path", p)
+			}
 		}
 	}
 }

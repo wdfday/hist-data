@@ -14,9 +14,9 @@ import (
 	"hist-data/internal/model"
 )
 
-// dailyFileRe matches: SYMBOL_TF_YYYY-MM-DD_to_YYYY-MM-DD.parquet
-var dailyFileRe = regexp.MustCompile(
-	`^(.+)_([A-Z0-9]+)_(\d{4}-\d{2}-\d{2})_to_(\d{4}-\d{2}-\d{2})\.parquet$`,
+// dailyPartRe matches daily-partition files: SYMBOL_TF_YYYY-MM-DD.parquet
+var dailyPartRe = regexp.MustCompile(
+	`^(.+)_([A-Z0-9]+)_(\d{4}-\d{2}-\d{2})\.parquet$`,
 )
 
 type monthKey struct {
@@ -26,11 +26,12 @@ type monthKey struct {
 	month  time.Month
 }
 
-// CompactMonthly walks providerDir and compacts daily Parquet files from
-// completed months into one monthly file per (symbol, tf, month).
+// CompactMonthly walks providerDir and compacts daily-partition Parquet files
+// from completed months into one monthly file per (symbol, tf, month).
 //
 // Expected structure: {providerDir}/{tf}/{symbol}/*.parquet
-// Monthly output:     {providerDir}/{tf}/{symbol}/{symbol}_{TF}_{YYYY-MM}.parquet
+// Daily files:        {symbol}_{TF}_{YYYY-MM-DD}.parquet   (written by saveBarsByMonth)
+// Monthly output:     {symbol}_{TF}_{YYYY-MM}.parquet
 //
 // Skips the current month. Skips groups where a monthly file already exists.
 func CompactMonthly(providerDir string, saver PacketSaver) error {
@@ -38,10 +39,12 @@ func CompactMonthly(providerDir string, saver PacketSaver) error {
 		return nil
 	}
 
+	slog.Info("compact: scanning", "dir", providerDir)
+
 	now := time.Now().UTC()
 	currentYM := now.Format("2006-01")
 
-	// Collect daily files grouped by (symbol, tf, year-month) → dir
+	// Collect daily-partition files grouped by (symbol, tf, year-month) → dir
 	type entry struct {
 		dir   string
 		files []string // full paths
@@ -52,29 +55,23 @@ func CompactMonthly(providerDir string, saver PacketSaver) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
-		m := dailyFileRe.FindStringSubmatch(d.Name())
+		m := dailyPartRe.FindStringSubmatch(d.Name())
 		if m == nil {
 			return nil
 		}
-		symbol, tf, fromStr, toStr := m[1], m[2], m[3], m[4]
+		symbol, tf, dateStr := m[1], m[2], m[3]
 
-		from, err := time.Parse("2006-01-02", fromStr)
-		if err != nil {
-			return nil
-		}
-		to, err := time.Parse("2006-01-02", toStr)
+		t, err := time.Parse("2006-01-02", dateStr)
 		if err != nil {
 			return nil
 		}
 
-		// Only compact files within the same month that is not the current month
-		sameMonth := from.Year() == to.Year() && from.Month() == to.Month()
-		ym := from.Format("2006-01")
-		if !sameMonth || ym == currentYM {
+		// Skip current month
+		if t.Format("2006-01") == currentYM {
 			return nil
 		}
 
-		k := monthKey{symbol: symbol, tf: tf, year: from.Year(), month: from.Month()}
+		k := monthKey{symbol: symbol, tf: tf, year: t.Year(), month: t.Month()}
 		if _, ok := groups[k]; !ok {
 			groups[k] = &entry{dir: filepath.Dir(path)}
 		}
@@ -85,17 +82,24 @@ func CompactMonthly(providerDir string, saver PacketSaver) error {
 		return fmt.Errorf("walk %s: %w", providerDir, err)
 	}
 
+	if len(groups) == 0 {
+		slog.Info("compact: nothing to compact", "dir", providerDir)
+		return nil
+	}
+	slog.Info("compact: found groups", "dir", providerDir, "months", len(groups))
+
 	for k, e := range groups {
 		ym := fmt.Sprintf("%04d-%02d", k.year, int(k.month))
 		monthlyName := fmt.Sprintf("%s_%s_%s.parquet", k.symbol, k.tf, ym)
 		monthlyPath := filepath.Join(e.dir, monthlyName)
 
 		if _, err := os.Stat(monthlyPath); err == nil {
-			slog.Debug("compact: monthly file exists, skipping",
+			slog.Info("compact: already exists, skipping",
 				"symbol", k.symbol, "tf", k.tf, "month", ym)
 			continue
 		}
 
+		slog.Info("compact: merging", "symbol", k.symbol, "tf", k.tf, "month", ym, "daily_files", len(e.files))
 		sort.Strings(e.files)
 		var all []model.Bar
 		for _, f := range e.files {
@@ -107,6 +111,7 @@ func CompactMonthly(providerDir string, saver PacketSaver) error {
 			all = append(all, bars...)
 		}
 		if len(all) == 0 {
+			slog.Warn("compact: no bars read, skipping", "symbol", k.symbol, "tf", k.tf, "month", ym)
 			continue
 		}
 
@@ -117,15 +122,18 @@ func CompactMonthly(providerDir string, saver PacketSaver) error {
 			continue
 		}
 
+		removed := 0
 		for _, f := range e.files {
 			if err := os.Remove(f); err != nil {
 				slog.Warn("compact: remove daily file failed", "path", f, "err", err)
+			} else {
+				removed++
 			}
 		}
 
-		slog.Info("compact: month done",
+		slog.Info("compact: done",
 			"symbol", k.symbol, "tf", k.tf, "month", ym,
-			"files", len(e.files), "bars", len(all), "out", monthlyPath)
+			"daily_files", len(e.files), "removed", removed, "bars", len(all), "out", monthlyPath)
 	}
 
 	return nil

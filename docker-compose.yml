@@ -11,13 +11,12 @@ services:
       - POLYGON_API_KEYS=${POLYGON_API_KEYS:-}
       # TwelveData: forex + multi-asset (disabled by default in config.yaml)
       - TWELVEDATA_API_KEY=${TWELVEDATA_API_KEY:-}
-      # ── Optional runtime overrides ─────────────────────────────────────────
+      # ── Runtime overrides ──────────────────────────────────────────────────
       # - LOG_LEVEL=debug
-      # - DATA_DIR=/app/data
       # - SAVE_FORMAT=parquet
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - ${DATA_DIR_HOST:-../data}:/mallow/data
+      - ${DATA_DIR_HOST:-../data}:/data
     restart: unless-stopped
 
 networks:

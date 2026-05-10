@@ -1,8 +1,6 @@
 # Build stage
 FROM golang:1.26-alpine AS builder
 
-RUN apk add --no-cache git
-
 WORKDIR /app
 
 COPY go.mod go.sum ./
