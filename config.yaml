@@ -74,7 +74,7 @@ schedule:
 
 # ── Global data settings ───────────────────────────────────────────────────
 data:
-  dir: data             # relative → anchored to dir of config.yaml (repo root); absolute → kept as-is (Docker); override via DATA_DIR env
+  dir: ../data          # relative → anchored to dir of config.yaml; resolves to mallow/data/ (one level up from hist-data/)
   format: parquet       # parquet | csv | JSON; override via SAVE_FORMAT env
 
 
@@ -97,7 +97,7 @@ assets:
         from: "2024-05"
       - name: D1
         from: "2024-01"     # Polygon free tier ≈ 5y
-    enabled: false
+    enabled: true
     groups:
       #      - sp500           # ~503 stocks, free (GitHub CSV)
       - nasdaq100       # ~101 stocks, free (Wikipedia)
@@ -150,7 +150,7 @@ assets:
       - AVAXUSDT
       - DOTUSDT
       - LINKUSDT
-      - MATICUSDT
+      - POLUSDT
     validate: false
 
   # ── Crypto via OKX — D1 only (M1 history from BinanceFlat above) ─────────
@@ -159,7 +159,7 @@ assets:
     frames:
       - name: D1
         from: ""            # full history (resolved via /public/instruments listTime)
-    enabled: true
+    enabled: false
     groups: []
     tickers:
       - BTC-USDT
@@ -201,7 +201,7 @@ assets:
       - name: M1
         sinkFrames: [M1, M5, M15, M30, H1, H4]
         from: "2023-01"     # VCI minute history ≈ 1y
-    enabled: false
+    enabled: true
     groups:
       - VN30
       # - VN100
