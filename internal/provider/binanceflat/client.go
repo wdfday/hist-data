@@ -134,7 +134,14 @@ func sha256Hex(b []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-// parseCSV parses Vision kline CSV. Columns 0..5 are openTime, O, H, L, C, V.
+// parseCSV parses Vision kline CSV.
+//
+// Binance Vision columns:
+//
+//	0: openTime   1: O   2: H   3: L   4: C   5: volume
+//	6: closeTime  7: quoteAssetVolume  8: numberOfTrades
+//	9: takerBuyBaseVol  10: takerBuyQuoteVol  11: ignore
+//
 // Vision switched openTime from milliseconds to microseconds around 2025-01;
 // we detect the magnitude and normalize back to milliseconds.
 func parseCSV(r io.Reader) ([]model.Bar, error) {
@@ -174,13 +181,28 @@ func parseCSV(r io.Reader) ([]model.Bar, error) {
 		cl, _ := strconv.ParseFloat(rec[4], 64)
 		v, _ := strconv.ParseFloat(rec[5], 64)
 
+		var vwap float64
+		if len(rec) > 7 {
+			quoteVol, _ := strconv.ParseFloat(rec[7], 64)
+			if v > 0 {
+				vwap = quoteVol / v
+			}
+		}
+
+		var txns int64
+		if len(rec) > 8 {
+			txns, _ = strconv.ParseInt(rec[8], 10, 64)
+		}
+
 		bars = append(bars, model.Bar{
-			Timestamp: ts,
-			Open:      o,
-			High:      h,
-			Low:       l,
-			Close:     cl,
-			Volume:    int64(v * 1e6),
+			Timestamp:    ts,
+			Open:         o,
+			High:         h,
+			Low:          l,
+			Close:        cl,
+			Volume:       int64(v * 1e6),
+			VWAP:         vwap,
+			Transactions: txns,
 		})
 	}
 	return bars, nil

@@ -33,7 +33,7 @@ func SaveFrameSet(provider, sourceFrame string, sinkFrames []string, dir, symbol
 
 // intradayMaxRank is the rank of H4 — frames at or below this rank are
 // intraday and get partitioned by calendar month.
-const intradayMaxRank = 6 // H4
+const intradayMaxRank = 11 // H12
 
 // SaveBars persists bars for a single frame directly (no aggregation).
 // Intraday frames (M1–H4) are partitioned by calendar month; daily and
@@ -168,8 +168,9 @@ func saveBarsSingleFile(provider, frame, dir, symbol string, bars []model.Bar, p
 // frameRank defines the hierarchy for sink validation.
 // A sink frame must have a higher rank than its source.
 var frameRank = map[string]int{
-	"M1": 1, "M5": 2, "M15": 3, "M30": 4,
-	"H1": 5, "H4": 6, "D1": 7, "W1": 8, "MN": 9,
+	"M1": 1, "M3": 2, "M5": 3, "M15": 4, "M30": 5,
+	"H1": 6, "H2": 7, "H4": 8, "H6": 9, "H8": 10, "H12": 11,
+	"D1": 12, "W1": 13, "MN": 14,
 }
 
 func barsForFrame(sourceFrame, sinkFrame string, bars []model.Bar) ([]model.Bar, error) {
@@ -236,6 +237,8 @@ func barsForFrame(sourceFrame, sinkFrame string, bars []model.Bar) ([]model.Bar,
 // bucketFn returns a function that maps a UTC timestamp to its bucket start (UnixMilli).
 func bucketFn(frame string) func(time.Time) int64 {
 	switch frame {
+	case "M3":
+		return func(t time.Time) int64 { return t.Truncate(3 * time.Minute).UnixMilli() }
 	case "M5":
 		return func(t time.Time) int64 { return t.Truncate(5 * time.Minute).UnixMilli() }
 	case "M15":
@@ -244,8 +247,16 @@ func bucketFn(frame string) func(time.Time) int64 {
 		return func(t time.Time) int64 { return t.Truncate(30 * time.Minute).UnixMilli() }
 	case "H1":
 		return func(t time.Time) int64 { return t.Truncate(time.Hour).UnixMilli() }
+	case "H2":
+		return func(t time.Time) int64 { return t.Truncate(2 * time.Hour).UnixMilli() }
 	case "H4":
 		return func(t time.Time) int64 { return t.Truncate(4 * time.Hour).UnixMilli() }
+	case "H6":
+		return func(t time.Time) int64 { return t.Truncate(6 * time.Hour).UnixMilli() }
+	case "H8":
+		return func(t time.Time) int64 { return t.Truncate(8 * time.Hour).UnixMilli() }
+	case "H12":
+		return func(t time.Time) int64 { return t.Truncate(12 * time.Hour).UnixMilli() }
 	case "D1":
 		return func(t time.Time) int64 { return t.Truncate(24 * time.Hour).UnixMilli() }
 	case "W1":

@@ -93,7 +93,7 @@ assets:
     provider: massive
     frames:
       - name: M1
-        sinkFrames: [M1, M5, M15, M30, H1, H4]
+        sinkFrames: [M1, M3, M5, M15, M30, H1, H2, H4, H6, H8, H12]
         from: "2024-05"
       - name: D1
         from: "2024-01"     # Polygon free tier ≈ 5y
@@ -126,6 +126,8 @@ assets:
     frames:
       - name: M1
         from: ""            # full history from 2017 (pre-listing months skipped via 404)
+      - name: M3
+        from: ""
       - name: M5
         from: ""
       - name: M15
@@ -134,7 +136,15 @@ assets:
         from: ""
       - name: H1
         from: ""
+      - name: H2
+        from: ""
       - name: H4
+        from: ""
+      - name: H6
+        from: ""
+      - name: H8
+        from: ""
+      - name: H12
         from: ""
       - name: D1
         from: ""
@@ -199,7 +209,7 @@ assets:
 #        sinkFrames: [W1, MN]
         from: "2000"        # VCI daily history ≈ 25y
       - name: M1
-        sinkFrames: [M1, M5, M15, M30, H1, H4]
+        sinkFrames: [M1, M3, M5, M15, M30, H1, H2, H4, H6, H8, H12]
         from: "2023-01"     # VCI minute history ≈ 1y
     enabled: true
     groups:

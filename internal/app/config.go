@@ -244,11 +244,16 @@ func resolveDataDir(dir, cfgFile string) string {
 
 var supportedFrameNames = map[string]bool{
 	"M1":  true,
+	"M3":  true,
 	"M5":  true,
 	"M15": true,
 	"M30": true,
 	"H1":  true,
+	"H2":  true,
 	"H4":  true,
+	"H6":  true,
+	"H8":  true,
+	"H12": true,
 	"D1":  true,
 	"W1":  true,
 	"MN":  true,
@@ -289,7 +294,7 @@ func validateConfig(cfg *Config) error {
 				return fmt.Errorf("asset %q: frame name must not be empty", a.Class)
 			}
 			if !supportedFrameNames[frame.Name] {
-				return fmt.Errorf("asset %q: unsupported frame %q (allowed: M1, M5, M15, M30, H1, H4, D1, W1, MN)", a.Class, frame.Name)
+				return fmt.Errorf("asset %q: unsupported frame %q (allowed: M1, M3, M5, M15, M30, H1, H2, H4, H6, H8, H12, D1, W1, MN)", a.Class, frame.Name)
 			}
 			if frame.From != "" {
 				valid := false
@@ -495,8 +500,9 @@ func normalizeFrameSpec(frame FrameSpec) FrameSpec {
 
 // knownFrames mirrors saver.frameRank — all valid frame names.
 var knownFrames = map[string]int{
-	"M1": 1, "M5": 2, "M15": 3, "M30": 4,
-	"H1": 5, "H4": 6, "D1": 7, "W1": 8, "MN": 9,
+	"M1": 1, "M3": 2, "M5": 3, "M15": 4, "M30": 5,
+	"H1": 6, "H2": 7, "H4": 8, "H6": 9, "H8": 10, "H12": 11,
+	"D1": 12, "W1": 13, "MN": 14,
 }
 
 func validateSinkFrames(asset resolvedAsset) error {

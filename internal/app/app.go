@@ -66,7 +66,7 @@ func Run(ctx context.Context) {
 
 	ps, _ := buildPacketSaver(cfg)
 	if ps != nil {
-		for _, provider := range []string{"binance", "okx", "massive", "vci", "twelvedata"} {
+		for _, provider := range []string{"binance", "binanceflat", "okx", "massive", "vci", "twelvedata"} {
 			dir := cfg.ProviderSaveDir(provider)
 			if err := saver.CompactMonthly(dir, ps); err != nil {
 				slog.Warn("compact monthly failed", "provider", provider, "err", err)

@@ -21,12 +21,13 @@ type GapChartRequest struct {
 // GapChartSeries is one symbol's OHLCV arrays in the response.
 // VCI may return t and v as numbers or strings — FlexNum parses both.
 type GapChartSeries struct {
-	T []FlexNum `json:"t"` // timestamp (seconds)
-	O []float64 `json:"o"`
-	H []float64 `json:"h"`
-	L []float64 `json:"l"`
-	C []float64 `json:"c"`
-	V []FlexNum `json:"v"` // volume
+	T                []FlexNum `json:"t"` // timestamp (seconds)
+	O                []float64 `json:"o"`
+	H                []float64 `json:"h"`
+	L                []float64 `json:"l"`
+	C                []float64 `json:"c"`
+	V                []FlexNum `json:"v"`                // volume (shares)
+	AccumulatedValue []float64 `json:"accumulatedValue"` // cumulative traded value (millions VND)
 }
 
 // FlexNum unmarshals JSON number or string (e.g. "1735689600") to int64.

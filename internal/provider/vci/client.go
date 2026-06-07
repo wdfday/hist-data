@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	defaultBaseURL   = "https://trading.vietcap.com.vn/api"
-	gapChartPath     = "/chart/OHLCChart/gap-chart"
+	defaultBaseURL     = "https://trading.vietcap.com.vn/api"
+	gapChartPath       = "/chart/OHLCChart/gap-chart"
 	symbolsByGroupPath = "/price/symbols/getByGroup"
 )
 
@@ -55,10 +55,10 @@ func (c *Client) GetOHLC(timeFrame string, symbols []string, toSec int64, countB
 		return nil, fmt.Errorf("vci: symbols required")
 	}
 	body := GapChartRequest{
-		TimeFrame:  timeFrame,
-		Symbols:    symbols,
-		To:         toSec,
-		CountBack:  countBack,
+		TimeFrame: timeFrame,
+		Symbols:   symbols,
+		To:        toSec,
+		CountBack: countBack,
 	}
 	reqBody, err := json.Marshal(body)
 	if err != nil {
@@ -99,6 +99,10 @@ func (c *Client) GetOHLC(timeFrame string, symbols []string, toSec int64, countB
 }
 
 // seriesToBars converts VCI series (t in seconds) to model.Bar (Timestamp in ms).
+// VWAP is derived from accumulatedValue (cumulative traded value in millions VND).
+// For daily: VWAP = accumulatedValue × 1e6 / volume  (each bar is its own day).
+// For intraday: delta between consecutive accumulatedValue entries within the
+// same trading day gives per-bar traded value; VWAP = deltaValue × 1e6 / volume.
 func seriesToBars(s GapChartSeries) []model.Bar {
 	n := len(s.T)
 	if n == 0 {
@@ -120,6 +124,20 @@ func seriesToBars(s GapChartSeries) []model.Bar {
 		if i < len(s.V) {
 			vol = s.V[i].Int64()
 		}
+
+		var vwap float64
+		if i < len(s.AccumulatedValue) && vol > 0 {
+			// accumulatedValue is cumulative within the trading day.
+			// Delta gives this bar's traded value; divide by volume for VWAP.
+			barValue := s.AccumulatedValue[i]
+			if i > 0 && i-1 < len(s.AccumulatedValue) && sameDay(s.T[i-1].Int64(), tsSec) {
+				barValue = s.AccumulatedValue[i] - s.AccumulatedValue[i-1]
+			}
+			if barValue > 0 {
+				vwap = barValue * 1e6 / float64(vol)
+			}
+		}
+
 		bars[i] = model.Bar{
 			Timestamp: tsSec * 1000, // VCI uses seconds; model uses ms
 			Open:      s.O[i],
@@ -127,9 +145,18 @@ func seriesToBars(s GapChartSeries) []model.Bar {
 			Low:       s.L[i],
 			Close:     s.C[i],
 			Volume:    vol,
+			VWAP:      vwap,
 		}
 	}
 	return bars
+}
+
+// sameDay checks if two Unix-second timestamps fall on the same calendar day (UTC+7).
+func sameDay(aSec, bSec int64) bool {
+	loc := time.FixedZone("ICT", 7*3600)
+	a := time.Unix(aSec, 0).In(loc)
+	b := time.Unix(bSec, 0).In(loc)
+	return a.Year() == b.Year() && a.YearDay() == b.YearDay()
 }
 
 // LastTradingDay returns the most recent VN trading day by fetching the

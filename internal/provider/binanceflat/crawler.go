@@ -13,13 +13,12 @@ import (
 
 // Crawler implements crawl.BarFetcher by pulling kline ZIPs from Binance Vision.
 //
-// Strategy: walk the requested date range one calendar month at a time.
-//   - Closed months: try monthly ZIP first; if 404 (not yet published, typically
-//     up to ~7 days after month-end), fall back to daily ZIPs.
-//   - Current month: always daily ZIPs (monthly ZIP doesn't exist yet).
-//
-// Month-end compaction (daily files → monthly file) is handled externally by
-// saver.CompactMonthly; no rewind or re-download of closed months here.
+// Strategy:
+//   - Full-history backfill (from = zero): walk month-by-month. Closed months
+//     use monthly ZIPs first (404 → fallback to daily). Current month: daily.
+//   - Incremental crawl (from ≠ zero): always daily ZIPs regardless of whether
+//     the month is closed. saver.CompactMonthly merges daily → monthly at the
+//     next startup.
 type Crawler struct {
 	client        *Client
 	Interval      string // 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1mo
@@ -48,10 +47,15 @@ func NewCrawler(baseURL, saveDir, interval string, ps saver.PacketSaver) (*Crawl
 // (a few months before BTCUSDT genesis) and rely on 404 handling to skip
 // pre-listing months.
 //
-// Closed months use monthly ZIPs; the current/in-progress month falls back to
-// daily ZIPs. Month-end compaction (daily → monthly) is handled externally by
-// saver.CompactMonthly — no rewind needed here.
+// Full-history (from=zero): closed months use monthly ZIPs (404 → daily fallback).
+// Incremental (from≠zero): always daily ZIPs; CompactMonthly merges at startup.
 func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, error) {
+	// fullHistory = true when the caller provides a zero `from`, meaning
+	// "start from the beginning". Only in this mode do we use monthly ZIPs
+	// for closed months (bulk backfill). Incremental crawl always uses daily
+	// ZIPs; CompactMonthly merges them at next startup.
+	fullHistory := from.IsZero()
+
 	if from.IsZero() {
 		from = time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC)
 	}
@@ -71,7 +75,8 @@ func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, 
 	for !cur.After(to) {
 		nextMonth := cur.AddDate(0, 1, 0)
 
-		if cur.Before(currentMonthStart) {
+		// Use monthly ZIPs only during full-history backfill for closed months.
+		if fullHistory && cur.Before(currentMonthStart) {
 			bars, err := c.client.FetchMonthly(symbol, c.Interval, cur.Year(), cur.Month())
 			switch {
 			case errors.Is(err, ErrNotFound):
@@ -91,7 +96,7 @@ func (c *Crawler) FetchBars(symbol, _ string, from, to time.Time) ([]model.Bar, 
 			continue
 		}
 
-		// Current month: always daily.
+		// Incremental crawl or current month: always daily ZIPs.
 		dailyBars, err := c.fetchDailyRange(symbol, from, to, cur, nextMonth, fromMs, toMs)
 		if err != nil {
 			return nil, err

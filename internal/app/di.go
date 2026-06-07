@@ -188,6 +188,8 @@ func providerFrameSpec(provider, frame string) (providerFrame, error) {
 		switch frame {
 		case "M1":
 			return providerFrame{MassiveTimespan: "minute", MassiveMultiplier: 1}, nil
+		case "M3":
+			return providerFrame{MassiveTimespan: "minute", MassiveMultiplier: 3}, nil
 		case "M5":
 			return providerFrame{MassiveTimespan: "minute", MassiveMultiplier: 5}, nil
 		case "M15":
@@ -196,8 +198,16 @@ func providerFrameSpec(provider, frame string) (providerFrame, error) {
 			return providerFrame{MassiveTimespan: "minute", MassiveMultiplier: 30}, nil
 		case "H1":
 			return providerFrame{MassiveTimespan: "hour", MassiveMultiplier: 1}, nil
+		case "H2":
+			return providerFrame{MassiveTimespan: "hour", MassiveMultiplier: 2}, nil
 		case "H4":
 			return providerFrame{MassiveTimespan: "hour", MassiveMultiplier: 4}, nil
+		case "H6":
+			return providerFrame{MassiveTimespan: "hour", MassiveMultiplier: 6}, nil
+		case "H8":
+			return providerFrame{MassiveTimespan: "hour", MassiveMultiplier: 8}, nil
+		case "H12":
+			return providerFrame{MassiveTimespan: "hour", MassiveMultiplier: 12}, nil
 		case "D1":
 			return providerFrame{MassiveTimespan: "day", MassiveMultiplier: 1}, nil
 		case "W1":
@@ -209,6 +219,8 @@ func providerFrameSpec(provider, frame string) (providerFrame, error) {
 		switch frame {
 		case "M1":
 			return providerFrame{ProviderInterval: "1m"}, nil
+		case "M3":
+			return providerFrame{ProviderInterval: "3m"}, nil
 		case "M5":
 			return providerFrame{ProviderInterval: "5m"}, nil
 		case "M15":
@@ -217,8 +229,16 @@ func providerFrameSpec(provider, frame string) (providerFrame, error) {
 			return providerFrame{ProviderInterval: "30m"}, nil
 		case "H1":
 			return providerFrame{ProviderInterval: "1h"}, nil
+		case "H2":
+			return providerFrame{ProviderInterval: "2h"}, nil
 		case "H4":
 			return providerFrame{ProviderInterval: "4h"}, nil
+		case "H6":
+			return providerFrame{ProviderInterval: "6h"}, nil
+		case "H8":
+			return providerFrame{ProviderInterval: "8h"}, nil
+		case "H12":
+			return providerFrame{ProviderInterval: "12h"}, nil
 		case "D1":
 			return providerFrame{ProviderInterval: "1d"}, nil
 		case "W1":
